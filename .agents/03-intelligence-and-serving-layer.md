@@ -311,6 +311,7 @@ def init_logfire():
 ```
 
 Every function decorated with `@logfire.instrument()` produces a trace span. Key things surfaced in the dashboard:
+
 - Every AI call (which model, prompt tokens, completion tokens, latency, cost)
 - Every PII detection event (count + types redacted per document — via `logfire.info("pii_detected", ...)`)
 - Every MCP tool call and its arguments

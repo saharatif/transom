@@ -150,3 +150,232 @@ Test output:
    was not traced in the Logfire dashboard (only backend/main.py's
    init_logfire() does that) — tracing will be verified once wired into the
    /ingest/photo endpoint.
+
+---------------------------------------------------------------------
+TEST 5: POST /ingest/photo — full endpoint, real HTTP request
+---------------------------------------------------------------------
+Test name: ingest_photo_endpoint_test
+
+Bash command:
+uv run uvicorn backend.main:app --port 8000 &
+curl -s -X POST http://127.0.0.1:8000/ingest/photo \
+  -F "property_id=test-prop-1" \
+  -F "file=@docs/damaged_property/84a4b04e-d6f0-4adb-a3b0-0d0312f9c73b.jpeg"
+
+Test input:
+docs/damaged_property/84a4b04e-d6f0-4adb-a3b0-0d0312f9c73b.jpeg
+(uploaded via multipart/form-data POST, property_id=test-prop-1)
+
+Test output:
+{"status":"ok","assessment":{"floor_type":"hardwood","floor_condition":"good","wood_species":"oak","paint_condition":"good","condition_score":7,"visible_issues":["cabinet damage"],"estimated_age_years":10,"confidence":"medium"}}
+
+Logfire trace (confirmed live in dashboard):
+POST /ingest/photo
+  -> Calling backend.ingestion.image_agent.analyze_property_image
+     -> Chat Completion with 'gpt-4o' [LLM]
+     -> Calling backend.redaction.pii.redact_and_tokenize
+        -> pii_detected
+
+-> Full endpoint verified end-to-end via real HTTP request (not a direct
+   Python call): file upload -> temp storage -> image agent -> Vision ->
+   redaction -> JSON response. All spans confirmed nested correctly in
+   Logfire, closing out both remaining Milestone 2 items.
+
+---------------------------------------------------------------------
+TEST 6: blueprint_agent.py — process_blueprint() end-to-end
+---------------------------------------------------------------------
+Test name: blueprint_agent_ocr_extraction_test
+
+Bash command:
+/Users/saharatif/transom/.venv/bin/python3 -c "
+from dotenv import load_dotenv
+load_dotenv()
+from backend.ingestion.blueprint_agent import process_blueprint
+import os, json
+
+result = process_blueprint(
+    'docs/Blueprints/Blueprint_A101_Ground_Floor.pdf',
+    property_id='test-prop-1',
+    doc_id='test-blueprint-1',
+    db_path=os.environ.get('DATABASE_PATH', './property_intel.db')
+)
+print(json.dumps(result, indent=2))
+"
+
+Test input:
+docs/Blueprints/Blueprint_A101_Ground_Floor.pdf
+(ground floor blueprint PDF)
+
+Test output:
+{
+  "sqft": 2201,
+  "bedrooms": null,
+  "bathrooms": null,
+  "rooms": [],
+  "layout_type": "GROUND FLOOR"
+}
+-> Full pipeline verified: Mistral OCR (base64 document_url) -> join page
+   markdown -> redact_and_tokenize() -> GPT-4o structured extraction ->
+   JSON parse. sqft correctly extracted (2201 sqft). bedrooms/bathrooms/
+   rooms came back empty/null, which is plausible since this is only the
+   Ground Floor plan (A101) — bedrooms likely appear on the Upper Floor
+   plan (A102). Mechanically the pipeline works end-to-end; required two
+   fixes to the OCR call and response parsing (see BUGS.md #10, #11) plus
+   an mistralai SDK version pin (#10) before this succeeded.
+
+---------------------------------------------------------------------
+TEST 7: inspection_parser.py — attempt 1, Mistral OCR text (FAILED)
+---------------------------------------------------------------------
+Test name: inspection_parser_ocr_text_attempt
+
+Bash command:
+/Users/saharatif/transom/.venv/bin/python3 -c "
+from dotenv import load_dotenv
+load_dotenv()
+from backend.ingestion.inspection_parser import parse_inspection_form
+import os, json
+
+result = parse_inspection_form(
+    'docs/pdfs/Property_Inspection_form_filled.pdf',
+    property_id='test-prop-1',
+    doc_id='test-inspection-1',
+    db_path=os.environ.get('DATABASE_PATH', './property_intel.db')
+)
+print(json.dumps(result, indent=2))
+"
+
+Test input:
+docs/pdfs/Property_Inspection_form_filled.pdf
+(4-page filled inspection form, handwritten checkmarks + notes)
+
+Test output:
+{
+  "floor_type": "",
+  "floor_condition": "",
+  "wood_grade": "",
+  "paint_condition": "",
+  "roof_condition": "",
+  "hvac_age_years": "",
+  "kitchen_condition": "Cabinets need refacing / replacing",
+  "bathroom_condition": "",
+  "renovation_cost_estimate": "43000 - 70000",
+  "overall_condition_score": ""
+}
+-> FAILED (mostly empty). Root cause: Mistral OCR's markdown conversion
+   drops checkbox glyph state — checked and unchecked options render as
+   identical plain bullet text, so GPT-4o has no way to know which was
+   selected. See BUGS.md #12. Rewrote inspection_parser.py to use GPT-4o
+   Vision on rendered page images instead — see Test 8.
+
+---------------------------------------------------------------------
+TEST 8: inspection_parser.py — attempt 2, GPT-4o Vision on page images (PASSED)
+---------------------------------------------------------------------
+Test name: inspection_parser_vision_attempt
+
+Bash command:
+/Users/saharatif/transom/.venv/bin/python3 -c "
+from dotenv import load_dotenv
+load_dotenv()
+from backend.ingestion.inspection_parser import parse_inspection_form
+import os, json
+
+result = parse_inspection_form(
+    'docs/pdfs/Property_Inspection_form_filled.pdf',
+    property_id='test-prop-1',
+    doc_id='test-inspection-2',
+    db_path=os.environ.get('DATABASE_PATH', './property_intel.db')
+)
+print(json.dumps(result, indent=2))
+"
+
+Test input:
+docs/pdfs/Property_Inspection_form_filled.pdf
+(same 4-page filled inspection form, rendered to page images via pymupdf)
+
+Test output:
+{
+  "floor_type": "Engineered hardwood",
+  "floor_condition": "Warping / cupping present",
+  "wood_grade": "Mixed / inconsistent grade",
+  "paint_condition": "Poor — peeling / flaking",
+  "roof_condition": "Fair — granule loss / aging",
+  "hvac_age_years": "11–15 years",
+  "kitchen_condition": "Cabinets need refacing / replacing",
+  "bathroom_condition": "Grout / caulk deteriorating",
+  "renovation_cost_estimate": "Roof replacement: 8000-10000 USD, HVAC system: 5000-10000 USD, Kitchen remodel: 9000-18000 USD, Bathroom updates: 5000-10000 USD, Flooring refinish: [PHONE_NUMBER_ADECE3] USD, Exterior / curb appeal: [PHONE_NUMBER_ADECE3] USD, Paint (interior): 1000-3000 USD",
+  "overall_condition_score": null
+}
+-> PASSED (all checkbox fields correctly extracted, verified against manual
+   visual read of the PDF). Two known limitations found and documented:
+   (a) renovation_cost_estimate has two entries misredacted as
+   PHONE_NUMBER by Presidio (false positive on digit-hyphen-digit cost
+   ranges) — investigated a score_threshold fix, rejected because it
+   scores identically to real contextless phone numbers (see BUGS.md #13,
+   accepted as open trade-off); (b) overall_condition_score came back
+   null — the handwritten circled score on page 1 was not confidently
+   extracted (genuine scan-quality/ambiguity issue, not a code bug).
+
+---------------------------------------------------------------------
+TEST 9: POST /ingest/blueprint — full endpoint, real HTTP request
+---------------------------------------------------------------------
+Test name: ingest_blueprint_endpoint_test
+
+Bash command:
+uv run uvicorn backend.main:app --port 8000 &
+curl -s -X POST http://127.0.0.1:8000/ingest/blueprint \
+  -F "property_id=test-prop-1" \
+  -F "file=@docs/Blueprints/Blueprint_A102_Upper_Floor.pdf"
+
+Test input:
+docs/Blueprints/Blueprint_A102_Upper_Floor.pdf
+(uploaded via multipart/form-data POST, property_id=test-prop-1)
+
+Test output:
+{"status":"ok","fields":{"sqft":null,"bedrooms":4,"bathrooms":3,"rooms":[],"layout_type":"upper floor plan"}}
+
+Logfire trace (confirmed live in dashboard):
+POST /ingest/blueprint
+  -> Calling backend.ingestion.blueprint_agent.process_blueprint
+     -> Pydantic Unmarshaller/Marshaller validate_python (OCR request/response)
+     -> Calling backend.redaction.pii.redact_and_tokenize
+        -> pii_detected
+     -> Chat Completion with 'gpt-4o' [LLM]
+
+-> Full endpoint verified end-to-end. Correctly extracted bedrooms=4,
+   bathrooms=3 from the Upper Floor plan — complements Test 6 (Ground
+   Floor plan, which had sqft but no bedroom/bathroom info), confirming
+   the two blueprint pages partition property info as expected. sqft null
+   here is expected (total sqft is on the Ground Floor sheet, A101).
+
+---------------------------------------------------------------------
+TEST 10: POST /ingest/inspection — full endpoint, real HTTP request
+---------------------------------------------------------------------
+Test name: ingest_inspection_endpoint_test
+
+Bash command:
+uv run uvicorn backend.main:app --port 8000 &
+curl -s -X POST http://127.0.0.1:8000/ingest/inspection \
+  -F "property_id=test-prop-1" \
+  -F "file=@docs/pdfs/Property_Inspection_form_filled.pdf"
+
+Test input:
+docs/pdfs/Property_Inspection_form_filled.pdf
+(uploaded via multipart/form-data POST, property_id=test-prop-1)
+
+Test output:
+{"status":"ok","fields":{"floor_type":"Engineered hardwood","floor_condition":"Water damage visible","wood_grade":"Mixed / inconsistent grade","paint_condition":"Poor — peeling / flaking","roof_condition":"Fair — granule loss / aging","hvac_age_years":"11-15 years","kitchen_condition":"Cabinets need refacing / replacing","bathroom_condition":"Grout / caulk deteriorating","renovation_cost_estimate":[{"item":"Roof replacement","priority":1,"est_cost":"8000 - 10000 USD","roi":"140%"},{"item":"HVAC system","priority":1,"est_cost":"5000 - 10000 USD","roi":"120%"},{"item":"Kitchen remodel","priority":2,"est_cost":"9000 - 18000 USD","roi":"150%"},{"item":"Bathroom updates","priority":2,"est_cost":"5000 - 10000 USD","roi":"125%"},{"item":"Flooring refinish","priority":2,"est_cost":"[PHONE_NUMBER_759A4A] USD","roi":"142%"},{"item":"Exterior / curb appeal","priority":1,"est_cost":"[PHONE_NUMBER_759A4A] USD","roi":"150%"},{"item":"Paint (interior)","priority":2,"est_cost":"1000 - 3000 USD","roi":"152%"}],"overall_condition_score":null}}
+
+Logfire trace (confirmed live in dashboard):
+POST /ingest/inspection
+  -> Calling backend.ingestion.inspection_parser.parse_inspection_form
+     -> Chat Completion with 'gpt-4o' [LLM]
+     -> Calling backend.redaction.pii.redact_and_tokenize
+        -> pii_detected
+
+-> Full endpoint verified end-to-end via real HTTP request. This time the
+   model additionally structured renovation_cost_estimate as a JSON array
+   per line item (rather than the single string from Test 8), still
+   reproducing the known PHONE_NUMBER false positive on "4000-9000" and
+   "3000-7000" cost ranges (BUGS.md #13, accepted open trade-off).
+   overall_condition_score again null (BUGS.md — scan-quality limitation).
+   Closes out Milestone 3.

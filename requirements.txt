@@ -7,7 +7,7 @@ python-dotenv==1.0.1
 
 # LLM / AI
 openai>=2.44.0
-mistralai==1.2.0
+mistralai==1.5.2
 
 # RAG
 langchain==0.3.7
@@ -25,6 +25,7 @@ spacy==3.7.5
 # Image
 opencv-python==4.10.0.84
 pillow==11.0.0
+pymupdf==1.28.0
 
 # Reranking
 sentence-transformers==3.3.0
@@ -32,6 +33,8 @@ sentence-transformers==3.3.0
 # Observability
 logfire[fastapi]>=4.37.0
 importlib_metadata>=6.0
+opentelemetry-api>=1.42.1
+opentelemetry-semantic-conventions>=0.63b1
 
 # MCP
 mcp==1.1.0
