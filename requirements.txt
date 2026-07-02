@@ -1,11 +1,12 @@
 fastapi>=0.115.6
 uvicorn[standard]==0.32.0
 python-multipart==0.0.12
-pydantic==2.9.0
+pydantic>=2.9.0
 pydantic-settings==2.6.0
+python-dotenv==1.0.1
 
 # LLM / AI
-openai==1.54.0
+openai>=2.44.0
 mistralai==1.2.0
 
 # RAG
@@ -29,7 +30,8 @@ pillow==11.0.0
 sentence-transformers==3.3.0
 
 # Observability
-logfire==2.6.0
+logfire[fastapi]>=4.37.0
+importlib_metadata>=6.0
 
 # MCP
 mcp==1.1.0

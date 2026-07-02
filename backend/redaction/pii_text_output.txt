@@ -1,0 +1,8 @@
+INPUT:
+Inspector John Smith can be reached at john.smith@example.com or 214-555-0199.
+
+REDACTED:
+Inspector [PERSON_F72B9C] can be reached at [EMAIL_ADDRESS_AC63AA] or [PHONE_NUMBER_312642].
+
+RESTORED (de-tokenized):
+Inspector John Smith can be reached at john.smith@example.com or 214-555-0199.

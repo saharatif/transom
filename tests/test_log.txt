@@ -1,0 +1,152 @@
+=====================================================================
+TEST LOG — Property Intelligence System
+Milestone 2 (Photo pipeline) — manual verification runs
+=====================================================================
+
+---------------------------------------------------------------------
+TEST 1: preprocess.py — blur_faces_and_plates() on image with no face
+---------------------------------------------------------------------
+Test name: preprocess_no_face_test
+
+Bash command:
+uv run python -c "
+from backend.ingestion.preprocess import blur_faces_and_plates
+out = blur_faces_and_plates('docs/damaged_property/05d11f75-c19d-475e-a592-3ff32c67c5a0.jpeg')
+print('output:', out)
+"
+
+Test input:
+docs/damaged_property/05d11f75-c19d-475e-a592-3ff32c67c5a0.jpeg
+(exterior front-entrance photo, no human face present)
+
+Test output:
+output: docs/damaged_property/05d11f75-c19d-475e-a592-3ff32c67c5a0_safe.jpeg
+-> Ran without error. No faces detected (expected, since none are present),
+   so output image is effectively an unmodified copy. Confirmed function
+   executes cleanly end-to-end. Output file removed after test (not a real
+   face case) — see Test 2 for the real face-blur verification.
+
+---------------------------------------------------------------------
+TEST 2: preprocess.py — blur_faces_and_plates() on images WITH faces
+---------------------------------------------------------------------
+Test name: preprocess_with_face_test
+
+Bash command:
+uv run python -c "
+from backend.ingestion.preprocess import blur_faces_and_plates
+import shutil, os
+
+images = [
+    'docs/damaged_property/Gemini_Generated_Image_qr4lm3qr4lm3qr4l_with_face.png',
+    'docs/damaged_property/Gemini_Generated_Image_37u5hg37u5hg37u5_with_face.png',
+]
+
+for img in images:
+    out = blur_faces_and_plates(img)
+    dest = os.path.join('docs/preprocess_output', os.path.basename(out))
+    shutil.move(out, dest)
+    print(f'{img} -> {dest}')
+"
+
+Test input:
+docs/damaged_property/Gemini_Generated_Image_qr4lm3qr4lm3qr4l_with_face.png
+  (exterior shot, 2 people/faces visible)
+docs/damaged_property/Gemini_Generated_Image_37u5hg37u5hg37u5_with_face.png
+  (interior kitchen shot, 1 person/face visible)
+
+Test output:
+docs/damaged_property/Gemini_Generated_Image_qr4lm3qr4lm3qr4l_with_face.png -> docs/preprocess_output/Gemini_Generated_Image_qr4lm3qr4lm3qr4l_with_face_safe.png
+docs/damaged_property/Gemini_Generated_Image_37u5hg37u5hg37u5_with_face.png -> docs/preprocess_output/Gemini_Generated_Image_37u5hg37u5hg37u5_with_face_safe.png
+-> Both faces confirmed visually blurred (Gaussian blur applied over detected
+   face bounding boxes) in the output PNGs. Outputs saved under
+   docs/preprocess_output/.
+
+---------------------------------------------------------------------
+TEST 3: pii.py — redact_and_tokenize() / de_tokenize() round trip
+---------------------------------------------------------------------
+Test name: pii_redact_detokenize_roundtrip_test
+
+Bash command:
+/Users/saharatif/transom/.venv/bin/python3 -c "
+from backend.redaction.pii import redact_and_tokenize, de_tokenize
+import backend.db.setup_db as setup_db
+setup_db.setup_db()
+
+text = 'Inspector John Smith can be reached at john.smith@example.com or 214-555-0199.'
+clean = redact_and_tokenize(text, 'test-doc-1', setup_db.DB_PATH)
+restored = de_tokenize(clean, 'test-doc-1', setup_db.DB_PATH)
+
+with open('pii_text_output.txt', 'w') as f:
+    f.write('INPUT:\n' + text + '\n\n')
+    f.write('REDACTED:\n' + clean + '\n\n')
+    f.write('RESTORED (de-tokenized):\n' + restored + '\n')
+
+print('done')
+"
+
+Test input:
+"Inspector John Smith can be reached at john.smith@example.com or 214-555-0199."
+
+Test output:
+REDACTED:
+"Inspector [PERSON_F72B9C] can be reached at [EMAIL_ADDRESS_AC63AA] or [PHONE_NUMBER_312642]."
+
+RESTORED (de-tokenized):
+"Inspector John Smith can be reached at john.smith@example.com or 214-555-0199."
+-> PERSON, EMAIL_ADDRESS, and PHONE_NUMBER all correctly detected, tokenized,
+   stored in pii_token_map, and correctly restored via de_tokenize(). Full
+   input/output saved to backend/redaction/pii_text_output.txt.
+
+Note: required a separate setup step — Presidio's AnalyzerEngine() needs the
+en_core_web_lg spaCy model, which was not installed by requirements.txt alone
+(see BUGS.md #8).
+
+---------------------------------------------------------------------
+TEST 4: image_agent.py — analyze_property_image() end-to-end
+---------------------------------------------------------------------
+Test name: image_agent_vision_analysis_test
+
+Bash command:
+/Users/saharatif/transom/.venv/bin/python3 -c "
+from dotenv import load_dotenv
+load_dotenv()
+from backend.ingestion.image_agent import analyze_property_image
+import os
+
+result = analyze_property_image(
+    'docs/damaged_property/12021852-c863-4823-90ff-ef0fc2ef99b0.jpeg',
+    property_id='test-prop-1',
+    doc_id='test-img-1',
+    db_path=os.environ.get('DATABASE_PATH', './property_intel.db')
+)
+import json
+print(json.dumps(result, indent=2))
+"
+
+Test input:
+docs/damaged_property/12021852-c863-4823-90ff-ef0fc2ef99b0.jpeg
+(interior room photo — visible ceiling hole/water damage, cracked wall,
+hardwood flooring)
+
+Test output:
+{
+  "floor_type": "hardwood",
+  "floor_condition": "worn",
+  "wood_species": "oak",
+  "paint_condition": "poor",
+  "condition_score": 3,
+  "visible_issues": [
+    "ceiling damage",
+    "wall cracks",
+    "water staining"
+  ],
+  "estimated_age_years": 15,
+  "confidence": "medium"
+}
+-> Full pipeline verified: blur_faces_and_plates() -> GPT-4o Vision call ->
+   redact_and_tokenize() -> JSON parse. Output correctly reflects visible
+   damage in the source photo (ceiling hole, wall crack, worn hardwood).
+   Note: this ad-hoc script did not call logfire.configure(), so this run
+   was not traced in the Logfire dashboard (only backend/main.py's
+   init_logfire() does that) — tracing will be verified once wired into the
+   /ingest/photo endpoint.
