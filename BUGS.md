@@ -196,6 +196,91 @@ The checkbox glyph (☐/☑) and any checkmark are dropped in the markdown conve
 
 **Status:** Open / accepted trade-off. Revisit if this becomes a recurring problem — options discussed: per-call-site `context=[...]` hints to Presidio (boosts real phone matches without touching the shared default), or a stricter phone-format regex requiring realistic digit groupings.
 
+### 14. `graph.py` — `ValueError: 'answer' is already being used as a state key`
+
+**Error:**
+```
+File ".../langgraph/graph/state.py", line 318, in add_node
+    raise ValueError(f"'{node}' is already being used as a state key")
+ValueError: 'answer' is already being used as a state key
+```
+
+**Cause:** `build_rag_graph()` registered a node named `"answer"` (`g.add_node("answer", answer_node)`), which collides with the `answer` field already declared in `RAGState`. This version of `langgraph` (0.2.45, matching the pin exactly — not a version-drift issue) rejects a node name that shadows a state key.
+
+**Fix:** Renamed the node to `"generate_answer"` in `add_node`, `add_conditional_edges`'s mapping, and `add_edge`, while keeping the `RAGState.answer` field and `return {**state, "answer": ...}` untouched — the node name and the state field it writes to are independent.
+
+### 15. `rag_agent` — LLM cites the wrong section number / possible hallucination not grounded in retrieval
+
+**Symptom:** Asked the agent `"Is a 1/8 inch crack in the master bath drywall covered under warranty?"` against the real ingested `Warranty_documents.pdf`. The answer was substantively correct (1/8" exceeds the real 1/32" threshold in § 7) but cited `"Section 2"` — the actual clause is under **§ 7. Performance Standards for Drywall**.
+
+**Investigation:**
+- Confirmed the real clause exists in the source PDF: `"(c) A drywall surface shall not crack such that any crack equals or exceeds 1/32 of an inch in width..."` under `§ 7. Performance Standards for Drywall`.
+- Inspected the 3 chunks the reranked retriever actually returned for that question — **none of them contained the "1/32 of an inch" clause at all.** The model's answer was not grounded in what it retrieved, despite the system prompt saying "Answer using ONLY the sources" — it appears to have answered from outside knowledge of this standard TAB warranty document (or paraphrased/inferred from an adjacent but wrong clause), not from the provided context.
+- Ran the raw MMR retriever (before reranking) with the same question directly: **the correct chunk was present at position 0 of 5 candidates.** The `CrossEncoderReranker` (top_n=3) demoted it out of the final top 3 — likely because a different, wrong chunk (a stucco crack-width clause, also mentioning "1/8 of an inch") scored higher by lexical/surface similarity to the query's "1/8 inch" phrase, despite being about the wrong material entirely.
+- Separately found chunk metadata carried no section-number field at all — even a correctly retrieved chunk had no reliable way to be cited by section number; the LLM would have to infer it from surrounding prose (chunks near a section boundary don't always repeat the "§ N. ..." header).
+
+**Fix:**
+- `backend/rag/ingestion.py`: added `_section_map()` / `_section_for_chunk()` to tag every chunk with its real nearest-preceding section header (e.g. `"§ 7. Performance Standards for Drywall"`) as `metadata["section"]`, computed from character offsets in the source text at ingestion time.
+- `backend/rag/retrieval.py`: widened `build_retriever()` from `k=5/top_n=3` to `k=6/top_n=4` (and `fetch_k` 20→24) — reduces the chance the reranker discards the one chunk that actually answers the question.
+- `backend/rag/graph.py`: `answer_node` now prefixes each source chunk with its real `[§ N. ...]` section tag (from ingestion metadata) instead of a generic `[source chunk i]` label, and the prompt tells the model to cite that exact bracketed header. Citation regex updated to also catch `§ \d+` format.
+
+**Verified:** Re-ingested the warranty PDF (`docs/pdfs/Warranty_documents.pdf`) with the fixed pipeline. Re-ran the same question — citation now correctly reads `§ 7`, and the correct "1/32 of an inch" chunk is present among the 4 retrieved documents (previously absent). See `tests/test_log.txt`.
+
+**Residual risk:** This mitigates but doesn't eliminate the underlying risk — a cross-encoder reranker can still misrank on lexical false-matches for other queries not tested here. For a legal/warranty use case where wrong answers have real consequences, consider adding a post-answer verification step (e.g. checking the cited section number actually appears in the retrieved context) before shipping this to production use.
+
+### 16. `mcp/server.py` — `ModuleNotFoundError: No module named 'mcp.server.fastmcp'`
+
+**Error:**
+```
+File "backend/mcp/server.py", line 1, in <module>
+    from mcp.server.fastmcp import FastMCP
+ModuleNotFoundError: No module named 'mcp.server.fastmcp'
+```
+
+**Cause:** `requirements.txt` pinned `mcp==1.1.0`, from before the `FastMCP` high-level API existed in the SDK at all — `mcp.server` in that version only has the low-level `Server`/`stdio_server` primitives.
+
+**Fix:** `uv pip install --upgrade mcp` → `mcp==1.28.1`. This also pulled in several unrelated transitive upgrades (`uvicorn` 0.32.0→0.49.0, `python-dotenv` 1.0.1→1.2.2, `python-multipart` 0.0.12→0.0.32, `pydantic-settings` 2.6.0→2.14.2). Verified none of these broke anything: `FastMCP`, `logfire`, and `openai` all still import cleanly, and `uvicorn backend.main:app` still boots with `/health` returning `200 OK`. Updated `requirements.txt` pins to match (`>=` lower bounds, consistent with the rest of the file's approach after bug #10's lesson about avoiding blind exact-version staleness).
+
+### 17. Ingest endpoints never persisted extracted data to SQLite
+
+**Symptom:** `properties` and `maintenance_needs` tables were both empty despite having run `/ingest/photo`, `/ingest/blueprint`, and `/ingest/inspection` successfully multiple times in earlier milestones (Tests 5, 9, 10). MCP tools depending on these tables (`get_property_summary`, `get_maintenance`, `calculate_renovation_roi`) would silently return empty/`None` regardless of how much data had been "ingested."
+
+**Cause:** The three `/ingest/*` endpoints in `backend/main.py` called their respective agent functions and returned the extracted JSON directly to the caller, but never wrote anything into SQLite. The original Milestone 3 plan explicitly included "Store results in SQLite" — it was missed because the `PROGRESS.md` checklist item for that milestone didn't have a separate line item for persistence, only for the agent functions and endpoints existing.
+
+**Secondary issue found while fixing this:** `properties.id` is `INTEGER PRIMARY KEY` in the schema, but every test through Milestone 5 used string property IDs like `"test-prop-1"`. SQLite's dynamic typing wouldn't have errored on this, but it would silently break the `INTEGER PRIMARY KEY` rowid-alias behavior. Changed all three `/ingest/*` endpoint signatures from `property_id: str` to `property_id: int` to match the schema.
+
+**Fix:** Added `ensure_property_exists()`, `save_photo_assessment()`, `save_blueprint_fields()`, and `save_inspection_form()` to `backend/db/queries.py`, wired into the three `/ingest/*` endpoints in `main.py` right after each agent call. `save_blueprint_fields()` uses `COALESCE` so ingesting the Upper Floor blueprint after the Ground Floor one doesn't null out fields the first blueprint already set (e.g. `sqft` from A101 is preserved when A102's `bedrooms`/`bathrooms` are merged in).
+
+**Verified:** Reset the DB, re-ran all three endpoints for one property (`property_id=1`) via real HTTP requests, then queried SQLite directly — confirmed `properties` correctly shows `sqft: 2201` (from Ground Floor) + `bedrooms: 4, bathrooms: 3` (from Upper Floor) merged into one row, plus rows in `property_images`, `material_assessment` (2 rows, sourced `ai_photo` and `inspection`), and `inspection_forms`. See `tests/test_log.txt`.
+
+### 18. Frontend — `/property/{id}` fetch fails with `net::ERR_CONNECTION_RESET` in the browser (worked fine via curl)
+
+**Symptom:** `curl http://127.0.0.1:8000/property/1` succeeded every time, but the same request from the Vue app (browser `fetch`, and even a plain Node `fetch`) using `http://localhost:8000/...` failed with `ERR_CONNECTION_RESET` / `TypeError: Failed to fetch`. Backend access logs showed no corresponding request ever arrived — the failure happened before the request reached the server at all.
+
+**Investigation:** `node -e "require('dns').lookup('localhost', {all:true}, ...)"` showed `localhost` resolves to **`::1` (IPv6) first**, then `127.0.0.1` (IPv4). `uvicorn` only binds `127.0.0.1` by default. Browsers and Node's `fetch` (via `undici`) try addresses in DNS-returned order, so the IPv6 attempt goes first, gets refused/reset (nothing listening on `::1:8000`), and — depending on the client — that shows up as a connection reset rather than falling back cleanly to the working IPv4 address. `curl` on this system apparently orders/handles this differently, which is why it never reproduced the bug.
+
+**Fix:** Changed the frontend API client's base URL from `http://localhost:8000` to `http://127.0.0.1:8000` (`frontend/src/api/client.js`), bypassing DNS resolution order entirely.
+
+**Verified:** Re-ran the Playwright screenshot check — zero console errors, `/property/1` data loads and renders correctly.
+
+### 19. Frontend — `PropertyCard`/`RenovationTable` content invisible despite correct DOM
+
+**Symptom:** Screenshot showed the property card's hero image and thumbnails, then jumped straight to the "Renovation Priorities" panel — no title, price, address, or bed/bath/sqft badges visible in between, even though `/property/1` was returning correct data.
+
+**Investigation:** Queried the live DOM directly (`page.locator('.property-card').innerHTML()`) — the title/price/badges markup **was** present with correct values (`"Property #1"`, `"4 Bed"`, etc.). So this wasn't a data or template bug. Measured the element: `clientHeight: 186` vs `scrollHeight: 399` — the card was being rendered at less than half its content height, with the excess clipped by `overflow: hidden` (set intentionally for rounded corners).
+
+**Cause:** `.property-card` and `.reno-table-panel` are children of `.column` (`display: flex; flex-direction: column`) in `App.vue`. Flex items default to `flex-shrink: 1` and `min-height: auto`, so when the column's available height was tight, the browser shrank these cards below their natural content height instead of letting the column scroll (`.column` already had `overflow-y: auto` for exactly this case, but shrinking happened first).
+
+**Fix:** Added `flex-shrink: 0` to `.property-card` (`PropertyCard.vue`) and `.reno-table-panel` (`RenovationTable.vue`), so they keep their natural content height and the column scrolls instead of squeezing them.
+
+**Verified:** Re-screenshotted — full card content (title, price, address, badges, builder/year, status pin) now renders correctly in both light and dark themes.
+
 ## Open
 
 _13. `pii.py` phone-number recognizer can misflag numeric cost ranges (e.g. "4000-9000") as PHONE_NUMBER when no context words are present — accepted trade-off, not fixed (see #13 above)._
+
+_15b. RAG answer grounding is improved but not guaranteed — no automated check yet confirms a generated citation's section number actually appears in the chunks that were retrieved for that answer (see #15 residual risk)._
+
+_17b. `save_inspection_form()` doesn't extract `inspector_name_token`/`inspection_date`/`total_reno_cost` — the current inspection_parser.py prompt only pulls condition/checkbox fields, not the inspector-identity fields or a parsed cost total. `total_reno_cost` is left null; the full per-category cost breakdown is still available in `parsed_fields` JSON._
+
+_20. `rag_agent`'s final yes/no conclusion is not stable across identical runs of the same question — re-asking "Is a 1/8 inch crack in the master bath drywall covered under warranty?" during frontend testing produced "No, not covered" versus the earlier Milestone 5 test's "would be covered," both citing the same correct § 7 clause. The retrieved source text and citation are grounded correctly; only the model's final interpretation of whether exceeding a performance standard implies warranty coverage varies. Not fixed — flagged as a real consistency limitation for a legal/warranty use case, on top of the grounding risk already noted in #15._

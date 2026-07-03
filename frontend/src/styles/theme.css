@@ -1,0 +1,74 @@
+/* Design tokens from design/DESIGN.md — Modern Property Dashboard spec */
+
+:root,
+[data-theme='light'] {
+  --color-bg-main: #ffffff;
+  --color-bg-sidebar: #f4f5f7;
+  --color-bg-card: #f8f9fa;
+  --color-primary: #007bff;
+  --color-text-main: #212529;
+  --color-text-muted: #6c757d;
+  --color-border: #e2e8f0;
+  --shadow-card: 0 4px 12px rgba(0, 0, 0, 0.05);
+}
+
+[data-theme='dark'] {
+  --color-bg-main: #1a1a1a;
+  --color-bg-sidebar: #121212;
+  --color-bg-card: #242424;
+  --color-primary: #00cfff;
+  --color-text-main: #e0e0e0;
+  --color-text-muted: #a0a0a0;
+  --color-border: #333333;
+  --shadow-card: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background-color: var(--color-bg-main);
+  color: var(--color-text-main);
+  transition: background-color 0.3s ease, color 0.3s ease;
+  font-size: 10pt;
+  line-height: 1.5;
+}
+
+h1 {
+  font-size: 24pt;
+  line-height: 1.2;
+  font-weight: 700;
+  margin: 0;
+}
+
+h2 {
+  font-size: 14pt;
+  line-height: 1.3;
+  font-weight: 600;
+  margin: 0;
+}
+
+.caption {
+  font-size: 8.5pt;
+  line-height: 1.4;
+  color: var(--color-text-muted);
+}
+
+/* Production accessibility standard: visible focus ring on keyboard nav */
+:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+}

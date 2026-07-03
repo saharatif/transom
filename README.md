@@ -69,6 +69,20 @@ Check it's up:
 curl http://127.0.0.1:8000/health
 ```
 
+Run the frontend (separate terminal):
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Then open `http://localhost:5173`. The frontend talks to the backend at `http://127.0.0.1:8000` — use `127.0.0.1`, not `localhost`, in `frontend/src/api/client.js` (see [BUGS.md](BUGS.md) #18 for why).
+
+## Design reference
+
+Frontend visual design (light/dark theme tokens, component layout) follows [design/DESIGN.md](design/DESIGN.md).
+
 ## Repository structure
 
 ```
@@ -100,10 +114,10 @@ Tracking against the 8-milestone build order in [Module 4](.agents/04-frontend-a
 - [x] **Milestone 1 — Foundation**
 - [x] **Milestone 2 — Photo pipeline**
 - [x] **Milestone 3 — Structured extraction**
-- [ ] **Milestone 4 — Valuation module**
-- [ ] **Milestone 5 — RAG subsystem**
-- [ ] **Milestone 6 — MCP server**
-- [ ] **Milestone 7 — Frontend**
+- [x] **Milestone 4 — Valuation module**
+- [x] **Milestone 5 — RAG subsystem**
+- [x] **Milestone 6 — MCP server** (core tools done; Claude Desktop connection is a manual step, not yet done)
+- [x] **Milestone 7 — Frontend**
 - [ ] **Milestone 8 — Polish + demo**
 
 Full checklist and verification notes: [PROGRESS.md](PROGRESS.md).

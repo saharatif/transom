@@ -50,11 +50,14 @@ def parse_inspection_form(pdf_path: str, property_id: str, doc_id: str, db_path:
     content.append({"type": "text", "text": """
 This is a scanned property inspection form with handwritten checkmarks and
 notes across multiple pages. Read the checked boxes and handwritten values.
-Return ONLY JSON with keys: floor_type, floor_condition, wood_grade,
-paint_condition, roof_condition, hvac_age_years, kitchen_condition,
-bathroom_condition, renovation_cost_estimate, overall_condition_score.
-Use the label text of each checked box as the field value (e.g.
-"Engineered hardwood" for floor_type). If a field wasn't checked or is
+Return ONLY JSON with keys: builder, year_built, address, city_state_zip,
+floor_type, floor_condition, wood_grade, paint_condition, roof_condition,
+hvac_age_years, kitchen_condition, bathroom_condition,
+renovation_cost_estimate, overall_condition_score.
+builder/year_built/address/city_state_zip come from the "PROPERTY DETAILS"
+header at the top of the form (handwritten). Use the label text of each
+checked box as the value for the condition fields (e.g. "Engineered
+hardwood" for floor_type). If a field wasn't checked, filled in, or is
 illegible, use null.
 """})
 

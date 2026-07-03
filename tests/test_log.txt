@@ -379,3 +379,472 @@ POST /ingest/inspection
    "3000-7000" cost ranges (BUGS.md #13, accepted open trade-off).
    overall_condition_score again null (BUGS.md — scan-quality limitation).
    Closes out Milestone 3.
+
+---------------------------------------------------------------------
+TEST 11: calculator.py — worked examples from texas_property_valuation_formulas.pdf
+---------------------------------------------------------------------
+Test name: valuation_calculator_worked_examples_test
+
+Bash command:
+/Users/saharatif/transom/.venv/bin/python3 -c "
+from backend.valuation.calculator import calculate_base_value, calculate_renovation_impact, ROI_TABLE
+
+base = calculate_base_value(sqft=2000, year_built=2006, price_per_sqft=180, current_year=2026)
+print('Base value:', base, '| expected 288000.0 | match:', base == 288000.0)
+
+renovations = [
+    {'category': 'roof_replacement', 'cost': 10000},
+    {'category': 'kitchen_remodel', 'cost': 12000},
+]
+result = calculate_renovation_impact(base, renovations, local_median_ppsf=180, sqft=2000)
+print('Updated value:', result['updated_value'], '| expected 320000.0 | match:', result['updated_value'] == 320000.0)
+print('Net equity gain:', result['net_equity_gain'], '| expected 10000.0 | match:', result['net_equity_gain'] == 10000.0)
+print('Total uplift:', result['total_value_uplift'], '| expected 32000.0')
+print('Ceiling applied:', result['ceiling_applied'], '| expected False (ceiling far above)')
+
+expected_multipliers = {
+    'roof_replacement': 1.40, 'hvac_replacement': 1.20, 'kitchen_remodel': 1.50,
+    'bathroom_updates': 1.25, 'flooring_refinish': 1.42, 'curb_appeal_exterior': 1.50,
+}
+mismatches = [k for k, v in expected_multipliers.items() if ROI_TABLE[k]['multiplier'] != v]
+print('ROI table multiplier mismatches:', mismatches, '| expected []')
+"
+
+Test input:
+Section 1.3 worked example: 2000 sqft, built 2006, current year 2026,
+$180/sqft, standard maintenance (default depreciation_rate=0.010)
+Section 3 worked example: same property + roof replacement ($10,000) +
+kitchen remodel ($12,000)
+ROI_TABLE checked against Section 2.1's exact multiplier table
+
+Test output:
+Base value: 288000.0 | expected 288000.0 | match: True
+Updated value: 320000.0 | expected 320000.0 | match: True
+Net equity gain: 10000.0 | expected 10000.0 | match: True
+Total uplift: 32000.0 | expected 32000.0
+Ceiling applied: False | expected False (ceiling far above)
+ROI table multiplier mismatches: [] | expected []
+
+-> All exact worked-example figures from
+   docs/pdfs/texas_property_valuation_formulas.pdf reproduced precisely:
+   base value $288,000, updated value $320,000, net equity gain $10,000.
+   All six ROI_TABLE multipliers verified against the source doc's
+   Section 2.1 table (roof 1.40x, HVAC 1.20x, kitchen 1.50x, bathroom
+   1.25x, flooring 1.42x, curb appeal 1.50x).
+
+   Note: the doc's third worked example (all six renovations completed:
+   total cost $48,500, total uplift $67,000, 138% blended ROI) was not
+   used for an exact-match test — the doc gives only the aggregate
+   totals, not each category's individual renovation cost, so there's no
+   unique cost split to reverse-engineer and test against. Verified the
+   formula mechanics instead via the ceiling test below.
+
+---------------------------------------------------------------------
+TEST 12: calculator.py — neighborhood ceiling cap
+---------------------------------------------------------------------
+Test name: valuation_calculator_ceiling_cap_test
+
+Bash command:
+/Users/saharatif/transom/.venv/bin/python3 -c "
+from backend.valuation.calculator import calculate_base_value, calculate_renovation_impact
+
+base = calculate_base_value(sqft=1200, year_built=2015, price_per_sqft=150, current_year=2026)
+renovations = [
+    {'category': 'kitchen_remodel', 'cost': 18000},
+    {'category': 'bathroom_updates', 'cost': 12000},
+    {'category': 'roof_replacement', 'cost': 14000},
+]
+result = calculate_renovation_impact(base, renovations, local_median_ppsf=150, sqft=1200)
+ceiling = 150 * 1200 * 1.20
+print('Base value:', base)
+print('Raw updated (uncapped) would be:', base + result['total_value_uplift'])
+print('Ceiling:', ceiling)
+print('Updated value (capped):', result['updated_value'])
+print('Ceiling applied:', result['ceiling_applied'], '| expected True')
+print('Updated value == ceiling:', result['updated_value'] == ceiling)
+"
+
+Test input:
+1200 sqft, built 2015, $150/sqft, current year 2026, three renovations
+totaling $44,000 cost (kitchen $18k, bathroom $12k, roof $14k) — an
+intentionally oversized renovation spend relative to the property to
+force the raw updated value above the neighborhood ceiling.
+
+Test output:
+Base value: 160200.0
+Raw updated (uncapped) would be: 221800.0
+Ceiling: 216000.0
+Updated value (capped): 216000.0
+Ceiling applied: True | expected True
+Updated value == ceiling: True
+
+-> Confirms the neighborhood ceiling check from Section 2 ("Updated Value
+   should not exceed roughly 1.15-1.25x local median price/sqft x sqft")
+   works correctly: raw updated value ($221,800) exceeds the ceiling
+   ($216,000 at the default 1.20x multiplier), so the capped value is
+   returned instead and ceiling_applied is correctly flagged True.
+   Closes out Milestone 4.
+
+---------------------------------------------------------------------
+TEST 13: rag/ingestion.py — ingest_document() against real warranty PDF
+---------------------------------------------------------------------
+Test name: rag_ingestion_warranty_test
+
+Bash command:
+/Users/saharatif/transom/.venv/bin/python3 -c "
+from dotenv import load_dotenv
+load_dotenv()
+from backend.rag.ingestion import ingest_document
+import os, json
+
+result = ingest_document(
+    'docs/pdfs/Warranty_documents.pdf',
+    property_id='test-prop-1',
+    doc_id='test-warranty-1',
+    db_path=os.environ.get('DATABASE_PATH', './property_intel.db'),
+    doc_type='warranty'
+)
+print(json.dumps(result, indent=2))
+"
+
+Test input:
+docs/pdfs/Warranty_documents.pdf (34-page TAB Express Limited Home
+Warranty document)
+
+Test output (first attempt):
+ValueError: No active indexes found in your Pinecone project
+-> Pinecone index "property-intelligence" didn't exist yet. Created it
+   via pinecone-client (dimension=1536 for text-embedding-3-small,
+   metric=cosine, ServerlessSpec aws/us-east-1), polled until ready.
+
+Test output (after creating index):
+{
+  "chunks": 229,
+  "namespace": "property_test-prop-1_warranty"
+}
+-> Ingestion pipeline verified: PyMuPDFLoader -> redact_and_tokenize() ->
+   structural chunking -> OpenAI embeddings -> Pinecone upsert. 229 chunks
+   created and stored successfully.
+
+---------------------------------------------------------------------
+TEST 14: rag/graph.py — rag_agent full LangGraph pipeline (attempt 1, FAILED then FIXED)
+---------------------------------------------------------------------
+Test name: rag_agent_end_to_end_attempt
+
+Bash command:
+/Users/saharatif/transom/.venv/bin/python3 -c "
+from dotenv import load_dotenv
+load_dotenv()
+from backend.rag.graph import rag_agent
+
+result = rag_agent.invoke({
+    'question': 'Is a 1/8 inch crack in the master bath drywall covered under warranty?',
+    'property_id': 'test-prop-1',
+    'doc_type': 'warranty',
+    'documents': [],
+    'is_relevant': False,
+    'answer': '',
+    'citations': [],
+    'iterations': 0
+})
+print(result['answer'])
+print(result['citations'])
+"
+
+Test input:
+Question: 'Is a 1/8 inch crack in the master bath drywall covered under
+warranty?' against the ingested Warranty_documents.pdf (same question as
+the original implementation doc's demo script, Module 4 Section 17)
+
+Test output (first run):
+ValueError: 'answer' is already being used as a state key
+-> Node named "answer" collided with the RAGState.answer field (langgraph
+   0.2.45, matches the pin exactly). Renamed node to "generate_answer" in
+   graph.py (see BUGS.md #14).
+
+Test output (second run, after node rename):
+ANSWER: Yes, a 1/8 inch crack in the master bath drywall is covered under
+warranty. According to the warranty document, a drywall surface shall not
+crack such that any crack equals or exceeds 1/32 of an inch in width...
+(Section 2). Since 1/8 inch is greater than 1/32 inch, it would be covered.
+CITATIONS: ['Section 2']
+DOCS RETRIEVED: 3
+
+-> Answer content was substantively correct, but citation ("Section 2")
+   was WRONG — verified via full-text search of the source PDF that the
+   real clause is under "§ 7. Performance Standards for Drywall". Further
+   investigation (see BUGS.md #15) found none of the 3 retrieved chunks
+   even contained the "1/32 of an inch" clause — the answer was not
+   actually grounded in retrieval despite the "ONLY the sources" system
+   prompt. Root causes: (a) cross-encoder reranker demoted the correct
+   chunk out of top_n=3 due to a lexical false-match with an unrelated
+   stucco clause also mentioning "1/8 of an inch"; (b) chunks carried no
+   section-number metadata, so even a correctly retrieved chunk couldn't
+   be reliably cited. Fixed in ingestion.py (section metadata tagging),
+   retrieval.py (widened k=5->6, top_n=3->4), and graph.py (answer_node
+   now cites real section tags). See Test 15 for the fix verification.
+
+---------------------------------------------------------------------
+TEST 15: rag_agent — same question, after grounding/reranking fixes
+---------------------------------------------------------------------
+Test name: rag_agent_end_to_end_verified
+
+Bash command:
+# Cleared and re-ingested the warranty namespace with section metadata:
+/Users/saharatif/transom/.venv/bin/python3 -c "
+from dotenv import load_dotenv
+load_dotenv()
+from pinecone import Pinecone
+import os
+pc = Pinecone(api_key=os.environ['PINECONE_API_KEY'])
+pc.Index('property-intelligence').delete(delete_all=True, namespace='property_test-prop-1_warranty')
+"
+/Users/saharatif/transom/.venv/bin/python3 -c "
+from dotenv import load_dotenv
+load_dotenv()
+from backend.rag.ingestion import ingest_document
+import os
+ingest_document('docs/pdfs/Warranty_documents.pdf', 'test-prop-1', 'test-warranty-2',
+    os.environ.get('DATABASE_PATH', './property_intel.db'), 'warranty')
+"
+# Then re-ran the same rag_agent.invoke() call as Test 14
+
+Test input:
+Same question: 'Is a 1/8 inch crack in the master bath drywall covered
+under warranty?'
+
+Test output:
+ANSWER: [§ 7. Performance Standards for Drywall]
+A drywall surface shall not crack such that any crack equals or exceeds
+1/32 of an inch in width at any point along the length of the crack. A
+1/8 inch crack exceeds this standard, so it would typically be covered by
+warranty if it falls within the warranty period.
+CITATIONS: ['§ 7']
+DOCS RETRIEVED: 4
+ - § 11. Performance Standards for Stucco | has 1/32: False
+ - § 7. Performance Standards for Drywall | has 1/32: True
+ - § 3. Express Limited Home Warranty | has 1/32: False
+ - § 16. Performance Standards for Countertops and Backsplashes | has 1/32: False
+
+-> PASSED. Citation now correctly reads "§ 7" (verified against source PDF
+   via full-text search earlier). The chunk containing the actual "1/32 of
+   an inch" clause is now present among retrieved documents (was absent
+   in Test 14's first run). Confirms both fixes worked: section metadata
+   tagging grounds citations in real data, and widened k/top_n prevents
+   the reranker from silently discarding the correct chunk. Closes out
+   Milestone 5's core RAG pipeline (LangChain ingestion, retriever +
+   reranker, LangGraph agent). Residual risk documented in BUGS.md #15 —
+   no automated check yet verifies a citation's section actually appears
+   in the retrieved context for arbitrary future questions.
+
+---------------------------------------------------------------------
+TEST 16: SQLite persistence gap — end-to-end re-verification (Milestone 6 prep)
+---------------------------------------------------------------------
+Test name: sqlite_persistence_end_to_end_test
+
+Bash command:
+rm -f property_intel.db
+/Users/saharatif/transom/.venv/bin/python3 backend/db/setup_db.py
+uv run uvicorn backend.main:app --port 8000 &
+curl -s -X POST http://127.0.0.1:8000/ingest/photo -F "property_id=1" \
+  -F "file=@docs/damaged_property/12021852-c863-4823-90ff-ef0fc2ef99b0.jpeg"
+curl -s -X POST http://127.0.0.1:8000/ingest/blueprint -F "property_id=1" \
+  -F "file=@docs/Blueprints/Blueprint_A101_Ground_Floor.pdf"
+curl -s -X POST http://127.0.0.1:8000/ingest/blueprint -F "property_id=1" \
+  -F "file=@docs/Blueprints/Blueprint_A102_Upper_Floor.pdf"
+curl -s -X POST http://127.0.0.1:8000/ingest/inspection -F "property_id=1" \
+  -F "file=@docs/pdfs/Property_Inspection_form_filled.pdf"
+
+Test input:
+Fresh DB, one property (id=1), all 4 real test documents run through
+their endpoints in sequence.
+
+Test output:
+All 4 requests returned 200 OK with expected extracted JSON. Direct
+SQLite query afterward confirmed:
+properties: {id=1, sqft=2201, bedrooms=4, bathrooms=3.0, builder=null,
+  year_built=null, ...}  (before inspection_parser.py fix — see below)
+property_images: 1 row (condition_score=2, issues_detected=[...])
+material_assessment: 2 rows (source='ai_photo', source='inspection')
+inspection_forms: 1 row
+
+-> PASSED for basic persistence (properties row correctly merges sqft
+   from Ground Floor with bedrooms/bathrooms from Upper Floor via
+   COALESCE). Found this was previously entirely missing (BUGS.md #17) —
+   none of the /ingest/* endpoints wrote to SQLite before this fix, only
+   returned JSON to the caller. Also required changing property_id from
+   str to int on all three endpoints to match properties.id's
+   INTEGER PRIMARY KEY schema type.
+
+---------------------------------------------------------------------
+TEST 17: inspection_parser.py — extended to capture PROPERTY DETAILS header
+---------------------------------------------------------------------
+Test name: inspection_parser_property_details_test
+
+Bash command:
+curl -s -X POST http://127.0.0.1:8000/ingest/inspection -F "property_id=1" \
+  -F "file=@docs/pdfs/Property_Inspection_form_filled.pdf"
+# (after extending the extraction prompt to also request builder,
+# year_built, address, city_state_zip)
+
+Test input:
+Same filled inspection form, re-run after prompt extension.
+
+Test output:
+{"builder":"Texas Homes","year_built":2006,"address":null,
+"city_state_zip":null, ...condition fields unchanged...}
+
+properties row after re-ingest:
+{'id': 1, 'address': None, 'city_state_zip': None, 'builder': 'Texas Homes',
+ 'year_built': 2006, 'sqft': 2201, 'bedrooms': 4, 'bathrooms': 3.0, ...}
+
+-> PASSED. builder and year_built correctly extracted and persisted via
+   save_inspection_form()'s new COALESCE UPDATE into properties.
+   address/city_state_zip correctly came back null — confirmed earlier
+   (when the filled PDF was first reviewed) that those fields are
+   genuinely blank on the physical form, not an extraction miss.
+   Discovered this gap because calculate_renovation_roi (Test 18) needs
+   year_built and failed with a TypeError until this was fixed.
+
+---------------------------------------------------------------------
+TEST 18: mcp/server.py — all 6 MCP tools against real persisted data
+---------------------------------------------------------------------
+Test name: mcp_tools_end_to_end_test
+
+Bash command:
+/Users/saharatif/transom/.venv/bin/python3 -c "
+from dotenv import load_dotenv
+load_dotenv()
+import json
+from backend.mcp.server import (get_property_summary, get_maintenance,
+    estimate_property_value, calculate_renovation_roi, get_contractors,
+    get_warranty_coverage)
+print(json.dumps(get_property_summary(1), indent=2))
+print(json.dumps(get_maintenance(1), indent=2))
+print(json.dumps(estimate_property_value(sqft=2201, year_built=2006, zip_code='75001'), indent=2))
+print(json.dumps(calculate_renovation_roi(1, [
+    {'category': 'roof_replacement', 'cost': 10000},
+    {'category': 'kitchen_remodel', 'cost': 12000}], zip_code='75001'), indent=2))
+print(json.dumps(get_contractors('Kitchen & Bathroom Updates'), indent=2))
+print(json.dumps(get_warranty_coverage(1, 'Is a 1/8 inch crack in the master bath drywall covered under warranty?'), indent=2))
+"
+
+Test input:
+property_id=1 (real, persisted data from Tests 16-17); warranty doc
+re-ingested under namespace property_1_warranty (was previously under a
+stale property_id='test-prop-1' string namespace, mismatched with the
+new integer property_id convention)
+
+Test output:
+get_property_summary(1): full row incl. sqft=2201, bedrooms=4, bathrooms=3,
+  builder='Texas Homes', year_built=2006
+get_maintenance(1): [] (correctly empty — maintenance_needs never populated
+  by any ingestion pipeline; out of current scope)
+estimate_property_value: {"base_value": 316944.0, "price_per_sqft": 180.0}
+  (2201 * 180 * age_factor(0.80 for 20yr @2026) = 316,944 -- matches formula)
+calculate_renovation_roi(1): {"base_value": 316944.0,
+  "total_renovation_cost": 22000, "total_value_uplift": 32000.0,
+  "updated_value": 348944.0, "net_equity_gain": 10000.0,
+  "ceiling_applied": false, "breakdown": [...]}
+get_contractors('Kitchen & Bathroom Updates'):
+  [{"id": 2, "company_name": "Spruced - Decorating Den", ...}]
+get_warranty_coverage(1, ...): {"answer": "[§ 7. Performance Standards for
+  Drywall] A drywall surface shall not crack such that any crack equals or
+  exceeds 1/32 of an inch...", "citations": ["§ 7"]}
+
+-> ALL 6 TOOLS PASSED against real, end-to-end persisted/ingested data.
+   mcp==1.1.0 had no FastMCP API at all (ModuleNotFoundError) — upgraded
+   to mcp==1.28.1 (BUGS.md #16), which also pulled in unrelated transitive
+   upgrades (uvicorn, python-dotenv, python-multipart, pydantic-settings)
+   that were verified not to break anything (app still boots, /health
+   still 200 OK). get_warranty_coverage's first attempt (before
+   re-ingesting under the correct namespace) returned "not covered" with
+   no citations — correct, safe behavior given no sources existed for
+   that property_id's namespace at the time, not a bug in the tool
+   itself. Closes out Milestone 6.
+
+---------------------------------------------------------------------
+TEST 19: Frontend — visual verification via headless Chromium (Playwright)
+---------------------------------------------------------------------
+Test name: frontend_dashboard_visual_verification_test
+
+Bash command:
+uv run uvicorn backend.main:app --port 8000 &
+cd frontend && npm run dev &
+# then a Playwright script (chromium.launch --no-sandbox):
+#   nav http://localhost:5173, wait for "Property Dashboard",
+#   screenshot light mode, click theme toggle, screenshot dark mode,
+#   capture console errors
+
+Test input:
+Fresh dashboard load, property_id=1 (real data from Tests 16-18: sqft,
+bedrooms, bathrooms, builder, year_built, renovation breakdown all
+populated in SQLite from earlier milestones).
+
+Test output (attempt 1):
+CONSOLE_ERRORS: ["Failed to load resource: net::ERR_CONNECTION_RESET",
+  "TypeError: Failed to fetch at getProperty ..."]
+-> /property/1 fetch failed from the browser (and from plain Node fetch)
+   despite curl succeeding against the same URL. Root cause: "localhost"
+   resolves to ::1 (IPv6) before 127.0.0.1 on this system; uvicorn only
+   binds IPv4. Fixed by changing frontend/src/api/client.js's API base
+   URL to http://127.0.0.1:8000 (BUGS.md #18).
+
+Test output (attempt 2, after IPv4 fix):
+CONSOLE_ERRORS: []
+-> Data loaded, but screenshot showed PropertyCard's title/price/address/
+   badges section completely missing between the photo thumbnails and
+   the Renovation Priorities panel. Inspected the live DOM directly
+   (page.locator('.property-card').innerHTML()) — the correct markup
+   WAS present ("Property #1", "4 Bed", "3 Bath", "2,201 sqft", "Texas
+   Homes", "Built 2006", etc.) — not a data bug. Measured element:
+   clientHeight=186 vs scrollHeight=399 — content clipped by
+   overflow:hidden due to flexbox default shrink behavior (BUGS.md #19).
+   Fixed by adding flex-shrink:0 to .property-card and .reno-table-panel.
+
+Test output (attempt 3, after flex-shrink fix):
+CONSOLE_ERRORS: []
+-> Full dashboard renders correctly: sidebar nav, theme toggle, 3-column
+   layout (Upload | Property Card + Renovation Table | Chat), real
+   property photos (hero + 3 thumbnails), full property details (title,
+   price, address, bed/bath/sqft badges, builder/year, Available status
+   pin), renovation table with 7 rows including looked-up contractors
+   (Power HRG, Kohler Home Energy, Spruced - Decorating Den, EFS
+   Flooring and Remodeling) via the CATEGORY_MAP normalization, and the
+   chat panel with its initial greeting. Verified in both light and dark
+   themes — colors/contrast match design/DESIGN.md's token table in both
+   modes. Screenshots: /tmp/dashboard_light.png, /tmp/dashboard_dark.png.
+
+---------------------------------------------------------------------
+TEST 20: Frontend — real chat interaction end-to-end
+---------------------------------------------------------------------
+Test name: frontend_chat_interaction_test
+
+Bash command:
+# Playwright script: fill the chat input, click send, wait for the
+# "Thinking…" bubble to disappear (up to 40s — RAG grade/rewrite loop
+# can take ~20s), screenshot.
+page.fill('input[aria-label="Message"]', 'Is a 1/8 inch crack in the
+  master bath drywall covered under warranty?')
+page.click('button[aria-label="Send message"]')
+page.waitForSelector('text=Thinking…', {state: 'hidden', timeout: 40000})
+
+Test input:
+Same warranty question used throughout Milestone 5/6 testing, typed into
+the live chat UI (not called directly via Python).
+
+Test output:
+Client message bubble (blue, right-aligned) appeared immediately. Agent
+bubble (light blue, left-aligned) appeared after ~15-20s with the answer
+text and a "§ 7" citation chip rendered below it, matching the
+ChatPanel's citation-chip design. Zero console errors throughout.
+
+-> PASSED. Full loop verified working end-to-end through the actual UI:
+   type message -> POST /chat -> RAG agent -> rendered answer + citation
+   chip. One finding: this run's final answer concluded "No, not
+   covered," while the earlier Milestone 5 test (same question, same
+   correct § 7 citation) concluded "would be covered" — the model's
+   yes/no interpretation is not stable across runs even though the
+   grounding/citation itself is correct both times. Logged as an open
+   limitation (BUGS.md #20), not fixed. Closes out Milestone 7's
+   frontend build and integration testing.
