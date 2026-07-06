@@ -1,6 +1,7 @@
-import base64, json
+import base64, mimetypes
 from openai import OpenAI
 from .preprocess import blur_faces_and_plates
+from .llm_json import parse_llm_json
 from ..redaction.pii import redact_and_tokenize
 import logfire
 
@@ -21,6 +22,11 @@ def analyze_property_image(image_path: str, property_id: str, doc_id: str, db_pa
     with open(safe_image_path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode()
 
+    # Label the data URI with the file's real mime type — this was
+    # hardcoded to image/jpeg, mislabeling PNG/WebP uploads.
+    mime_type, _ = mimetypes.guess_type(safe_image_path)
+    mime_type = mime_type or "image/jpeg"
+
     # 2. Vision analysis — ask GPT-4o for a fixed set of known fields
     # (condition, materials, issues) rather than open-ended description,
     # since these map directly to the structured SQLite schema.
@@ -30,7 +36,7 @@ def analyze_property_image(image_path: str, property_id: str, doc_id: str, db_pa
             "role": "user",
             "content": [
                 {"type": "image_url",
-                 "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                 "image_url": {"url": f"data:{mime_type};base64,{b64}"}},
                 {"type": "text", "text": """
 Analyze this property image. Return ONLY JSON:
 {
@@ -47,10 +53,9 @@ Analyze this property image. Return ONLY JSON:
             ]
         }]
     )
-    # Vision sometimes wraps JSON in a markdown code fence; strip it before parsing.
-    raw = resp.choices[0].message.content.replace("```json", "").replace("```", "")
+    raw = resp.choices[0].message.content
 
     # 3. Redact any PII the model may have echoed into its text output
     # (e.g. a visible name/address in the photo) before it's stored.
     clean = redact_and_tokenize(raw, doc_id, db_path)
-    return json.loads(clean)
+    return parse_llm_json(clean)

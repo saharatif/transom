@@ -848,3 +848,772 @@ ChatPanel's citation-chip design. Zero console errors throughout.
    grounding/citation itself is correct both times. Logged as an open
    limitation (BUGS.md #20), not fixed. Closes out Milestone 7's
    frontend build and integration testing.
+
+---------------------------------------------------------------------
+TEST 21: rag_agent — measurement-comparison consistency fix (BUGS.md #20)
+---------------------------------------------------------------------
+Test name: rag_agent_measurement_reasoning_consistency_test
+
+Bash command:
+/Users/saharatif/transom/.venv/bin/python3 -c "
+from backend.rag.measurement import extract_inch_measurements, compare_measurement_to_sources
+q = 'Is a 1/8 inch crack in the master bath drywall covered under warranty?'
+src = '(c) A drywall surface shall not crack such that any crack equals or exceeds 1/32 of an inch in width...'
+print(extract_inch_measurements(q))
+print(extract_inch_measurements(src))
+print(compare_measurement_to_sources(q, src))
+"
+# then, after wiring into graph.py's answer_node:
+/Users/saharatif/transom/.venv/bin/python3 -c "
+from dotenv import load_dotenv
+load_dotenv()
+from backend.rag.graph import rag_agent
+for i in range(5):
+    result = rag_agent.invoke({'question': 'Is a 1/8 inch crack in the master bath drywall covered under warranty?', 'property_id': '1', 'doc_type': 'warranty', 'documents': [], 'is_relevant': False, 'answer': '', 'citations': [], 'iterations': 0})
+    print(result['answer'][:150])
+"
+# negative-case check:
+/Users/saharatif/transom/.venv/bin/python3 -c "
+from dotenv import load_dotenv
+load_dotenv()
+from backend.rag.graph import rag_agent
+result = rag_agent.invoke({'question': 'Is a 1/64 inch crack in the master bath drywall covered under warranty?', 'property_id': '1', 'doc_type': 'warranty', 'documents': [], 'is_relevant': False, 'answer': '', 'citations': [], 'iterations': 0})
+print(result['answer'])
+"
+
+Test input:
+Unit test: extract_inch_measurements()/compare_measurement_to_sources()
+against the real question + real source clause text.
+Integration test: same "1/8 inch crack" question run 5 times through the
+full rag_agent pipeline (real retrieval, real GPT-4o calls).
+Negative case: "1/64 inch crack" (below the 1/32 inch threshold, should
+conclude NOT covered).
+
+Test output:
+Unit test:
+  question values: [0.125]
+  source values: [0.03125]
+  comparison: {'measured_inches': 0.125, 'threshold_inches': 0.03125,
+    'exceeds_threshold': True}
+-> Correct deterministic comparison confirmed before wiring into graph.py.
+
+5-run consistency test: all 5 runs retrieved the threshold chunk
+(has_threshold_chunk=True) AND all 5 concluded "covered/defect"
+consistently — e.g. "A 1/8 inch crack in the drywall exceeds the
+allowable crack width of 1/32 of an inch, so it would be considered
+[a covered defect]." Zero flip-flops across 5 runs (previously
+inconsistent per BUGS.md #20's original finding).
+
+Negative case output:
+"A 1/64 inch crack in the drywall is not covered under warranty because
+it does not meet the threshold for coverage... Since 1/64 inch is less
+than 1/32 inch, it does not qualify for repair under the performance
+standards." citations: ['§ 7']
+-> Correctly concluded NOT covered when the measurement is within
+   tolerance — confirms the fix applies the comparison correctly in
+   both directions, not just biased toward "covered."
+
+-> PASSED. Fix (BUGS.md #20) verified: (1) measurement.py's
+   extract_inch_measurements()/compare_measurement_to_sources() do the
+   numeric comparison deterministically in Python; (2) graph.py's
+   answer_node injects the result as a COMPUTED FACT plus an explicit
+   two-step reasoning rule, removing the model's freely-interpreted
+   connection between "exceeds threshold" and "is covered." Note: one
+   separate run outside this 5-run batch still returned "not covered"
+   with zero citations due to a retrieval miss (the threshold chunk
+   wasn't retrieved that time) — a pre-existing, different issue
+   (BUGS.md #15 residual risk), not a regression or failure of this fix,
+   since the reasoning fix only applies once the correct source is
+   actually in context.
+
+---------------------------------------------------------------------
+TEST 22: Live dashboard use — two real data-quality regressions found and fixed
+---------------------------------------------------------------------
+Test name: live_dashboard_regression_fix_test
+
+Context: user re-uploaded Blueprint_A102_Upper_Floor.png and the filled
+inspection form through the running frontend (not a scripted test) and
+noticed the PropertyCard badges changed from "4 Bed / 3 Bath" to
+"2 Bed / 1 Bath", and the Renovation Priorities table went completely
+blank (category/cost/ROI/contractor all empty or "—").
+
+--- Bug A: blueprint bedroom/bathroom instability (BUGS.md #21) ---
+
+Bash command (reproduction):
+/Users/saharatif/transom/.venv/bin/python3 -c "
+from dotenv import load_dotenv
+load_dotenv()
+from backend.ingestion.blueprint_agent import process_blueprint
+result = process_blueprint('docs/Blueprints/Blueprint_A102_Upper_Floor.png',
+    'test-prop-1', 'test-mime-bug', 'property_intel.db')
+print(result)
+"
+
+Test output (reproduction, before fix):
+{"sqft": null, "bedrooms": 2, "bathrooms": 1,
+ "rooms": ["Bedroom 3", "Bedroom 4", "Bath 3"], "layout_type": "Upper Floor Plan"}
+-> Reproduced exactly. Compared raw Mistral OCR markdown between the
+   .pdf and .png versions of this sheet directly -- identical text in
+   both: "BEDROOMS 3 & 4 + BATH 3". Ruled out the mime-type theory as
+   the actual cause of THIS discrepancy (though still fixed as a real,
+   separate bug -- mimetypes.guess_type() now sets the correct mime
+   type instead of always assuming application/pdf).
+   Real cause: GPT-4o's extraction step interpreted the ambiguous
+   "BEDROOMS 3 & 4" label differently across runs -- literal item count
+   (2 bed) vs. highest room number in a numbering sequence (4 bed).
+
+Bash command (after prompt fix -- explicit room-numbering instruction):
+/Users/saharatif/transom/.venv/bin/python3 -c "
+from dotenv import load_dotenv
+load_dotenv()
+from backend.ingestion.blueprint_agent import process_blueprint
+for i in range(3):
+    result = process_blueprint('docs/Blueprints/Blueprint_A102_Upper_Floor.png',
+        'test-prop-1', f'test-numbering-fix-{i}', 'property_intel.db')
+    print(f'run {i+1}: bedrooms={result[\"bedrooms\"]}, bathrooms={result[\"bathrooms\"]}')
+"
+
+Test output (after fix):
+run 1: bedrooms=4, bathrooms=3
+run 2: bedrooms=4, bathrooms=3
+run 3: bedrooms=4, bathrooms=3
+-> PASSED. 3/3 consistent, correct results.
+
+--- Bug B: renovation_cost_estimate shape instability (BUGS.md #22) ---
+
+Test input:
+Same filled inspection form re-parsed 3 times after tightening the
+renovation_cost_estimate prompt to one fixed JSON schema.
+
+Test output (all 3 runs, abbreviated):
+[
+  {"category": "Roof replacement", "priority": 1, "cost": "8000-10000 USD", "roi": "140%"},
+  {"category": "HVAC system", "priority": 1, "cost": "5000-10000 USD", "roi": "120%"},
+  {"category": "Kitchen remodel", "priority": 2, "cost": "9000-18000 USD", "roi": "150%"},
+  ...
+  {"category": "Other", "priority": null, "cost": null, "roi": null}
+]
+-> PASSED. All 3 runs returned the exact same fixed shape
+   (category/priority/cost/roi keys) -- no more shape drift. Known,
+   separate PHONE_NUMBER false-positive on cost ranges (BUGS.md #13)
+   still occasionally appears in the "cost" field -- unrelated to this
+   fix, already an accepted open trade-off.
+
+--- Live re-verification ---
+
+Bash command:
+curl -s -X POST http://127.0.0.1:8000/ingest/blueprint -F "property_id=1" \
+  -F "file=@docs/Blueprints/Blueprint_A102_Upper_Floor.png"
+curl -s -X POST http://127.0.0.1:8000/ingest/inspection -F "property_id=1" \
+  -F "file=@docs/pdfs/Property_Inspection_form_filled.pdf"
+curl -s http://127.0.0.1:8000/property/1
+# + Playwright screenshot of the live dashboard
+
+Test output:
+/property/1 correctly shows bedrooms=4, bathrooms=3.0, and a fully
+populated renovations array (8 rows including "Other"). Screenshot
+confirmed PropertyCard badges read "4 Bed / 3 Bath" and Renovation
+Priorities table shows all rows with category, priority chip, cost,
+ROI, and contractor populated -- matching pre-regression appearance.
+
+-> Both regressions found via real interactive use (not a scripted
+   test) were root-caused, fixed, and verified for consistency across
+   multiple runs, then confirmed live in the running dashboard.
+
+---------------------------------------------------------------------
+TEST 23: Four user-requested fixes — logo, refresh button, painter
+contractor, estimated_value wiring
+---------------------------------------------------------------------
+Test name: dashboard_polish_and_valuation_wiring_test
+
+Requests:
+1. Use the actual logo from design/Gemini_..._logo.png instead of plain
+   "Transom" text in the header.
+2. Add a process/refresh button so uploads or stale data can be
+   manually re-checked.
+3. Add contractor "That 1 Painter" (https://that1painter.com/dallas,
+   Richardson TX, (214) 432-4636) to renovation_companies.
+4. Explain (and fix) why PropertyCard always showed "Value pending".
+
+Bash command (contractor insert):
+/Users/saharatif/transom/.venv/bin/python3 -c "
+import sqlite3
+conn = sqlite3.connect('property_intel.db')
+conn.execute(
+    'INSERT INTO renovation_companies (category, company_name, website, location, phone) VALUES (?, ?, ?, ?, ?)',
+    ('Interior Painting', 'That 1 Painter', 'https://that1painter.com/dallas', 'Richardson, TX', '(214) 432-4636')
+)
+conn.commit()
+"
+
+Bash command (estimated_value fix test):
+/Users/saharatif/transom/.venv/bin/python3 -c "
+from backend.db.queries import _maybe_update_estimated_value, get_property
+_maybe_update_estimated_value(1)
+print(get_property(1))
+"
+
+Test output:
+{'id': 1, ..., 'sqft': 2201, 'year_built': 2006, ..., 'price_per_sqft': 180.0,
+ 'estimated_value': 316944.0, ...}
+-> Matches the earlier direct MCP estimate_property_value() test result
+   exactly (Test 18). Confirms _maybe_update_estimated_value() computes
+   correctly.
+
+Live verification (Playwright screenshot against running dashboard):
+- Header shows the actual Transom logo image (icon + wordmark), not
+  plain text.
+- A refresh button (circular arrow, spin animation while loading) sits
+  next to the theme toggle; clicking it calls refreshProperty().
+- FileUpload's doc-type caption reads "Property Photo — multiple files
+  allowed" for photo/blueprint tabs (from the earlier multi-file work),
+  confirming that change is also live.
+- PropertyCard header shows "$316,944" instead of "Value pending".
+- RenovationTable's "Paint (interior)" row now shows "That 1 Painte[r]"
+  as its contractor (previously "—", since no category mapped to
+  paint work at all) -- confirmed via CATEGORY_MAP addition
+  ('paint (interior)' -> 'Interior Painting').
+- Zero console errors throughout.
+
+-> PASSED. All 4 requested items implemented, verified against the
+   live running app (not just unit-level), and documented (BUGS.md #23
+   for the estimated_value gap; schema.sql updated for the painter
+   contractor so fresh setups get it automatically going forward).
+
+---------------------------------------------------------------------
+TEST 24: SVG logo recreation (light/dark) + theme-swap wiring
+---------------------------------------------------------------------
+Test name: svg_logo_theme_swap_test
+
+Request: make the header logo bigger, recreate it as SVG for light and
+dark mode, save the SVGs in design/.
+
+Bash command (initial color sampling from the source PNG):
+/Users/saharatif/transom/.venv/bin/python3 -c "
+from PIL import Image
+img = Image.open('design/Gemini_Generated_Image_a1qcbsa1qcbsa1qc_logo.png').convert('RGB')
+# sampled icon band -> teal ~ (2,84,108); text band -> charcoal ~ (61,61,61)
+"
+
+Created: design/transom-logo-light.svg, design/transom-logo-dark.svg
+(three ascending column rects + diagonal beam polygon + "TRANSOM" text,
+colors tied to this app's own theme.css tokens: light icon #02546C /
+text #212529; dark icon #00CFFF / text #E0E0E0), copied into
+frontend/public/, wired into App.vue with height increased 40px->56px.
+
+Test output (attempt 1 -- CSS-only theme swap via :global()):
+Playwright screenshot showed the DARK-mode screenshot still displaying
+the light-colored icon/text (muted navy + near-invisible dark text on
+dark background) -- swap not happening.
+page.evaluate() check:
+  { dataTheme: 'dark', lightDisplay: 'block', darkDisplay: 'none' }
+-> The :global([data-theme='dark']) .logo-light CSS rule silently
+   didn't compile -- inspected actual injected stylesheet, rule was
+   missing entirely (BUGS.md #25).
+
+Test output (attempt 2 -- after fixing dark SVG's XML comment, CSS
+swap still in place):
+img.naturalWidth: 0 for the dark variant -- broken image, separate
+issue from the swap logic. Found <!-- ... --color-primary ... --> in
+the dark SVG's comment contains a literal "--" sequence, which is
+invalid inside an XML comment; browser's XML parser fatally rejected
+the whole SVG document when loaded via <img src> (BUGS.md #24).
+
+Fix applied: (a) reworded the dark SVG comment to avoid any "--"
+sequence; (b) replaced the CSS :global() swap with a MutationObserver
+in App.vue watching <html data-theme>, driving isDarkMode ref ->
+v-if/v-else between the two <img> tags.
+
+Test output (attempt 3, after both fixes):
+dark naturalWidth: 255 (real decoded image)
+Screenshots confirmed: light mode shows teal icon (#02546C) + dark
+wordmark on white; dark mode shows bright cyan icon (#00CFFF,
+matching --color-primary dark token) + light wordmark (#E0E0E0) on
+dark background. Toggling the theme button live swaps the image
+immediately in both directions.
+
+-> PASSED after two real bugs found and fixed (BUGS.md #24, #25).
+   Removed the now-unused frontend/public/logo.png (PNG fallback from
+   the earlier request, superseded by the SVG pair).
+
+---------------------------------------------------------------------
+TEST 25: Fresh-start state (no value shown until real uploads)
+---------------------------------------------------------------------
+Test name: fresh_database_no_value_test
+
+Context: user asked why $316,944 appeared as a "fixed" value on app
+start and wanted no value shown until uploads actually happen.
+Explanation (not a bug): $316,944 = calculate_base_value(sqft=2201
+from the blueprint, year_built=2006 from the inspection form,
+$180/sqft) via _maybe_update_estimated_value() (BUGS.md #23) -- it
+IS real, upload-derived data, just left over in property_intel.db
+from earlier testing sessions. App.vue hardcodes propertyId=1, and
+that property's data persists across server restarts since SQLite is
+a real file on disk -- restarting the app doesn't reset data.
+
+Bash command:
+rm -f property_intel.db
+/Users/saharatif/transom/.venv/bin/python3 backend/db/setup_db.py
+/Users/saharatif/transom/.venv/bin/python3 -c "
+import sqlite3
+conn = sqlite3.connect('property_intel.db')
+for table in ['properties', 'property_images', 'material_assessment', 'inspection_forms', 'renovation_companies']:
+    print(table, ':', conn.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0], 'rows')
+"
+
+Test output:
+properties : 0 rows
+property_images : 0 rows
+material_assessment : 0 rows
+inspection_forms : 0 rows
+renovation_companies : 5 rows
+-> renovation_companies correctly retains its 5 seeded contractors
+   (reference data, re-seeded by schema.sql on every setup_db.py run,
+   not upload-derived) -- everything else correctly empty.
+
+GET /property/1 (after reset): {"property":null,"renovations":[]}
+
+Live verification (Playwright screenshot):
+PropertyCard shows "No property data yet -- upload photos, a
+blueprint, or an inspection form to get started." (no title, no price,
+no badges). RenovationTable shows "No renovation data yet...". Upload
+History shows "No uploads yet this session." No console errors.
+
+-> PASSED. Confirmed the "fixed value" was real persisted data from
+   earlier sessions, not a bug or hardcoded placeholder. Database reset
+   to a clean state per user's request so property #1 now genuinely
+   starts empty and only gets a value after real blueprint + inspection
+   form uploads. Note: hero/thumbnail photos in PropertyCard are static
+   design-reference images (design/DESIGN.md spec), not tied to actual
+   uploaded photos -- still show even in the empty state; flagged to
+   user as a known, separate scope item, not changed without a request.
+
+---------------------------------------------------------------------
+TEST 26: pii.py currency-context filter (fixes BUGS.md #13) + blueprint
+0-vs-null bug (BUGS.md #27)
+---------------------------------------------------------------------
+Test name: currency_context_filter_and_blueprint_null_fix_test
+
+Context: user pointed out the RenovationTable showing
+"[PHONE_NUMBER_735CF1] USD" for Flooring refinish / Exterior curb
+appeal, and proposed a fix: "If the number has 'USD' or dollar sign
+next to it ... then its cost. Otherwise consider it as phone number."
+
+Bash command (filter unit test):
+/Users/saharatif/transom/.venv/bin/python3 -c "
+from backend.redaction.pii import analyzer
+text = 'Flooring refinish: 4000-9000 USD, John called 214-555-0199'
+results = analyzer.analyze(text=text, language='en')
+for r in results:
+    print(r.entity_type, repr(text[r.start:r.end]), '| next:', repr(text[r.end:r.end+10]))
+"
+
+Test output:
+PHONE_NUMBER '4000-9000' | next: ' USD, John'
+PHONE_NUMBER '214-555-0199' | next: ''
+-> Confirmed the pattern: false positive has ' USD' immediately after,
+   real phone number doesn't. Implemented _looks_like_currency() regex
+   check in pii.py, filtering PHONE_NUMBER matches before tokenizing.
+
+Bash command (fix verification, both directions):
+/Users/saharatif/transom/.venv/bin/python3 -c "
+import importlib
+import backend.redaction.pii as pii
+importlib.reload(pii)
+print(pii.redact_and_tokenize('Flooring refinish: 4000-9000 USD, Exterior / curb appeal: 3000-7000 USD', 'test-currency-fix', 'property_intel.db'))
+print(pii.redact_and_tokenize('Inspector John Smith can be reached at 214-555-0199 or john.smith@example.com', 'test-realphone-fix', 'property_intel.db'))
+"
+
+Test output:
+Currency test: Flooring refinish: 4000-9000 USD, Exterior / curb appeal: 3000-7000 USD
+Real phone test: Inspector [PERSON_2FE334] can be reached at [PHONE_NUMBER_9A9067] or [EMAIL_ADDRESS_ED0DAA]
+-> PASSED both directions: currency ranges no longer redacted, real
+   phone number still correctly redacted.
+
+Full parse_inspection_form() re-run against the real filled form:
+all 7 renovation_cost_estimate entries returned clean dollar ranges
+("4000-9000 USD", "3000-7000 USD", etc.) with zero PHONE_NUMBER
+placeholders.
+
+--- Second issue found while re-testing live: blueprint 0-vs-null ---
+
+Re-ingesting Ground Floor blueprint through the live API (server still
+running OLD pii.py in memory -- module caching, no --reload) surfaced:
+{"sqft":2201,"bedrooms":0,"bathrooms":0,...} -- properties.bedrooms/
+bathrooms dropped from correct 4/3 to 0/0, since COALESCE(0, existing)
+treats 0 as real data and overwrites. Root cause: the #21 room-
+numbering prompt fix caused GPT-4o to sometimes return 0 instead of
+null for "no bedroom info on this sheet."
+
+Fix: (1) blueprint_agent.py prompt now explicitly says use null, not 0,
+when a sheet has no room info; (2) save_blueprint_fields() changed to
+COALESCE(NULLIF(?, 0), existing) as a persistence-layer safeguard,
+given this field's repeat-incident history (#21, this one).
+
+Bash command (manual repair + full restart + re-verification):
+/Users/saharatif/transom/.venv/bin/python3 -c "
+import sqlite3
+conn = sqlite3.connect('property_intel.db')
+conn.execute('UPDATE properties SET bedrooms = 4, bathrooms = 3 WHERE id = 1')
+conn.commit()
+"
+# restarted backend to load pii.py + blueprint_agent.py + queries.py fixes
+curl -s -X POST http://127.0.0.1:8000/ingest/blueprint -F "property_id=1" \
+  -F "file=@docs/Blueprints/Blueprint_A101_Ground_Floor.pdf"
+curl -s -X POST http://127.0.0.1:8000/ingest/inspection -F "property_id=1" \
+  -F "file=@docs/pdfs/Property_Inspection_form_filled.pdf"
+curl -s http://127.0.0.1:8000/property/1
+
+Test output:
+Ground Floor re-ingest: {"sqft":2201,"bedrooms":null,"bathrooms":null,...}
+-> correctly null this time, not 0.
+/property/1: bedrooms=4, bathrooms=3.0 (preserved from Upper Floor,
+NOT clobbered), sqft=2201, estimated_value=316944.0.
+Renovation breakdown: all 7 cost entries clean, no PHONE_NUMBER
+placeholders.
+
+Live verification (Playwright screenshot): PropertyCard shows "4 Bed",
+"3 Bath", "2,201 sqft", "$316,944". RenovationTable shows real dollar
+costs across all rows with contractors correctly resolved.
+
+-> PASSED. Two real bugs found and fixed in one session: a
+   user-proposed, well-targeted PII redaction fix (#26, resolves the
+   long-standing #13 open item), and a fresh regression caught before
+   it could compound further (#27) thanks to re-testing immediately
+   after applying the first fix.
+
+---------------------------------------------------------------------
+TEST 27: New downloaded logo assets wired in, resized bigger
+---------------------------------------------------------------------
+Test name: new_logo_assets_test
+
+Request: user downloaded two new logo images (design/transom-logo-
+light.svg.png, design/transom-logo-dark.svg.png -- PNG files despite
+the .svg.png name) and asked to use them, bigger than before.
+
+Bash command (content-bbox detection to crop excess canvas whitespace):
+/Users/saharatif/transom/.venv/bin/python3 -c "
+from PIL import Image
+import numpy as np
+for name, f in [('light','design/transom-logo-light.svg.png'), ('dark','design/transom-logo-dark.svg.png')]:
+    img = Image.open(f).convert('RGB')
+    arr = np.array(img).astype(int)
+    bg = arr[5,5]
+    dist = np.sqrt(((arr - bg) ** 2).sum(axis=2))
+    mask = dist > 25
+    ys, xs = np.where(mask)
+    print(name, 'bbox: x', xs.min(), xs.max(), 'y', ys.min(), ys.max())
+"
+
+Test output: both images 1600x1000 canvas, content bbox x:496-1097
+y:100-730 (identical layout in both variants). Cropped with 30px
+padding -> 661x690 design/transom-logo-{light,dark}-full.png, copied to
+frontend/public/, wired into App.vue (replacing the earlier hand-drawn
+SVGs), height increased 56px -> 84px, rounded-corner card treatment
+kept since these PNGs have their own near-white/near-black background
+(not transparent) rather than exactly matching theme.css tokens.
+
+Live verification (Playwright):
+naturalWidth 661 for both light and dark variants (loaded correctly).
+Screenshots confirm: bigger logo showing the gradient teal/cyan
+ascending-columns icon, "TRANSOM" wordmark, and "ARCHITECTURAL
+STRUCTURES" tagline, correctly swapping between light and dark
+versions via the existing MutationObserver-driven v-if (BUGS.md #25).
+Full dashboard screenshot confirms no layout regressions elsewhere.
+Zero console errors.
+
+-> PASSED. Old hand-drawn placeholder SVGs (transom-logo-{light,dark}.svg)
+   removed from frontend/public/ (kept in design/ as historical
+   reference, superseded by these higher-fidelity downloaded assets).
+
+---------------------------------------------------------------------
+TEST 28: Dashboard UX/UI upgrade to premium-mockup reference image
+---------------------------------------------------------------------
+Test name: dashboard_premium_redesign_test
+
+Request: user shared a screenshot of a fuller "premium SaaS dashboard"
+mockup (top bar w/ search + org selector, labeled sidebar nav, tabbed
+upload queue w/ progress bars, sortable/filterable tables, chat with
+suggested-question chips) and asked to upgrade the app's UX/UI to match.
+
+Scoping decision (confirmed with user before building): visual polish
+only, not a full rebuild — skip nav items/features that don't map to
+anything real (Portfolio, Clients, Reports, Organization Selector,
+multi-tenant); keep/restyle what does. Also confirmed: default theme
+switched from light to dark to match the mockup.
+
+Changes made:
+- ThemeToggle.vue + index.html: default theme now dark (was light).
+  Added an inline <script> in index.html that sets data-theme before
+  Vue mounts, avoiding a flash-of-wrong-theme on load.
+- Sidebar.vue: widened 64px -> 200px, icon+label nav rows instead of
+  icon-only. Nav items trimmed to only what's real: Dashboard, Upload,
+  Chat, Settings (dropped Clients, which was a non-functional
+  placeholder in the original build too).
+- App.vue: added a top bar with a "Jump to property ID" search input
+  (functional -- Enter submits and calls getProperty for that ID,
+  triggering a refetch), a "Property #N" pill, kept refresh + theme
+  toggle. Logo resized 84px -> 52px to fit a slim single-row top bar
+  alongside the search input.
+- FileUpload.vue: renamed "Upload a New Property" panel to "Asset
+  Ingestion Queue"; added "Active Queue" / "Upload History" tabs over
+  the same underlying upload-history list (Active Queue = items still
+  Processing, filtered live); added an animated indeterminate progress
+  bar per in-flight upload row (real per-byte progress isn't available
+  from fetch(), so this is an honest "something is happening" indicator
+  rather than a fake percentage).
+- PropertyCard.vue: added a ribbon header ("PROPERTY #1 · location")
+  above the hero photo; added a "Quick Actions" row with 3 REAL actions
+  (not decorative): refresh (emits to App.vue's refreshProperty),
+  open primary photo in a new tab, copy property ID to clipboard
+  (shows a transient \"Copied!\" confirmation).
+- RenovationTable.vue: column headers (Category/Priority/Est. Cost/ROI)
+  are now clickable sort toggles (ascending/descending, parses leading
+  numbers out of cost/ROI strings for numeric sort); added a live
+  filter-by-category text input; Contractor column upgraded from plain
+  text to an actual <select> populated with the full contractor list
+  for that category (was previously just showing contractors[0]).
+- ChatPanel.vue: added a row of suggested-question chips above the
+  input bar, using 4 REAL questions already verified against the
+  actual ingested warranty document during earlier testing (not
+  placeholder copy) -- clicking one fills the input and sends
+  immediately.
+
+Bash command (functional smoke tests via Playwright):
+await page.click('button:has-text(\"Est. Cost\")')  // sort
+await page.fill('input[aria-label=\"Filter renovations\"]', 'roof')  // filter
+const optionsCount = await select.locator('option').count()  // dropdown
+await page.click('.suggested-chip:has-text(\"Are plumbing leaks covered?\")')  // chip
+
+Test output:
+- Sort by Est. Cost ascending -> first row \"Paint (interior)\" (lowest
+  leading cost, 1000-3000 USD). Correct.
+- Filter \"roof\" -> 1 row (only \"Roof replacement\"). Correct.
+- Contractor dropdown for row 1 -> 1 option (matches single seeded
+  contractor for that category). Renders correctly even with one option.
+- Suggested chip click -> sent \"Are plumbing leaks covered?\", got a
+  real grounded response citing \"§ 28. Performance Standards for
+  Plumbing Delivery Systems\" and \"§ 25. Performance Standards for
+  Plumbing\". Full round trip confirmed working, not just UI wiring.
+
+Live verification (Playwright screenshots, both themes, populated with
+real re-ingested data): dark mode (new default) and light mode both
+render correctly -- top bar, labeled sidebar, tabbed queue panel,
+property ribbon + quick actions, sortable/filterable renovation table
+with contractor dropdowns, chat with suggested chips. Zero console
+errors across all screenshots and interaction tests.
+
+-> PASSED. Note: one relative-path gotcha hit while re-ingesting test
+   data for verification -- curl commands run from frontend/ as cwd
+   failed silently on relative file paths (same class of issue as
+   earlier sessions); fixed by using $(pwd)-qualified absolute paths.
+   Not a bug in the app itself.
+
+=====================================================================
+TEST 29: Robustness pass — new pytest unit suite (66 tests)
+---------------------------------------------------------------------
+Test name: unit_test_suite
+
+Covers (tests/unit/):
+- test_valuation.py: PDF worked example ($288,000 base value), age-factor
+  floor at 0.60, uplift/net-equity/ceiling math, all 6 ROI categories,
+  unknown-category and bad-cost/sqft ValueError paths (new validation).
+- test_measurement.py: fraction/decimal extraction, zero-denominator
+  edge (found a real latent bug: "1/0 inch" leaked a spurious 0.0-inch
+  decimal match — fixed), and the new subject-scoped threshold narrowing
+  replicating the real mixed-threshold retrieval from BUGS.md #33.
+- test_llm_json.py: fenced/preambled/nested/escaped JSON extraction and
+  the empty/no-JSON/unbalanced/malformed error paths of the new shared
+  parse_llm_json() helper.
+- test_pii.py: two-distinct-people round trip (regression for BUGS.md
+  #28 — previously both names restored as the SAME person), email/phone
+  round trip, currency-range non-redaction (#13/#26), no-PII passthrough.
+- test_queries.py: NULLIF zero-clobber guard (#27), estimated-value
+  trigger firing only when sqft+year_built both exist (#23), inspection
+  header COALESCE behavior, all 3 renovation_cost_estimate JSON shapes
+  (#22) — against a fresh schema.sql temp DB per test.
+- test_api.py: FastAPI TestClient with mocked agents — photo persistence
+  stores the _safe blurred path (regression for BUGS.md #32), blueprint/
+  inspection persistence, 415 extension rejection per doc type, agent
+  failure -> 502 with reason and no partial DB rows, /property 404,
+  blank chat 422.
+
+Bash command:
+uv run pytest tests/unit -q
+
+Test output:
+66 passed, 7 warnings in ~5s
+-> PASSED (after fixing the two real bugs the suite caught: the
+   measurement 1/0-inch edge and the save_photo_assessment wiring).
+
+=====================================================================
+TEST 30: Hardened API endpoints — live negative-path checks
+---------------------------------------------------------------------
+Test name: api_negative_paths_live_test
+
+Bash commands:
+curl -s -X POST http://127.0.0.1:8000/ingest/photo -F property_id=1 \
+  -F file=@evil.txt
+curl -s -X POST http://127.0.0.1:8000/ingest/inspection -F property_id=1 \
+  -F 'file=@evil.txt;filename=../../etc/cron.pdf'
+curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/property/999
+curl -s -X POST http://127.0.0.1:8000/chat -F property_id=1 \
+  -F 'message=   ' -o /dev/null -w '%{http_code}'
+
+Test output:
+- .txt photo upload -> 415 {"detail":"Unsupported file type .txt for
+  photo. Allowed: .jpeg, .jpg, .png, .webp"}
+- traversal filename '../../etc/cron.pdf' -> spooled to a safe uuid temp
+  path (/var/folders/.../transom_<uuid>.pdf), then clean 502 with the
+  PyMuPDF reason; no path escape, no partial DB writes.
+- /property/999 -> 404 (was previously 200 with null property).
+- blank chat message -> 422.
+-> PASSED.
+
+=====================================================================
+TEST 31: RAG correctness + stability after graph overhaul (BUGS.md #33)
+and full UI E2E of the redesigned frontend
+---------------------------------------------------------------------
+Test name: rag_consistency_and_ui_e2e_test
+
+Bash commands:
+for run in 1 2 3 4 5; do curl -s -X POST http://127.0.0.1:8000/chat \
+  -F property_id=1 -F "message=Is a 1/8 inch crack in the drywall covered?"; done
+curl ... -F "message=Is a 1/64 inch crack in the drywall covered?"
+curl ... -F "message=Does the warranty cover my car parked in the garage?"
+node e2e_check.mjs / e2e_chat2.mjs  (Playwright: real photo upload via
+the focused Upload view, toast + history verification, suggested-chip
+chat round trip, shared-session check between views, screenshots of
+dashboard dark/light + upload/chat/settings views + not-found state)
+
+Test output:
+- Drywall 1/8": 5/5 runs -> covered, COMPUTED FACT cites 0.125 > 0.03125,
+  citation "§ 7". (Before the fix: consistently "not covered" with no
+  citations — see BUGS.md #33 for the three-layer cause.)
+- Drywall 1/64": within tolerance -> not covered. Correct direction.
+- Off-topic (car): "not covered". Correct.
+- UI E2E: real photo upload -> success toast ("processed — property data
+  updated"), Upload History row, property_images DB row storing the
+  _safe blurred path with condition_score. Chat chip -> grounded § 7
+  answer rendered with pre-wrap formatting + citation chip. Dashboard
+  chat column shows the same transcript as the focused Chat view
+  (shared-session composables). Screenshots verified in both themes and
+  all four sidebar views; SVG icons render everywhere (no emoji).
+-> PASSED.
+
+=====================================================================
+TEST 32: Reset-database button (Settings) — POST /reset
+---------------------------------------------------------------------
+Test name: reset_database_button_test
+
+Bash commands:
+uv run pytest tests/unit -q   # includes new
+  test_reset_clears_ingested_data_but_keeps_contractors
+node reset_check.mjs          # Playwright: Settings -> click Reset
+                              # (arms) -> click again (confirms)
+sqlite3 property_intel.db "SELECT COUNT(*) FROM properties; ..."
+
+Test output:
+- Unit suite: 67 passed. Reset deletes properties/property_images/
+  material_assessment/maintenance_needs/inspection_forms/documents/
+  pii_token_map; renovation_companies (seeded contractors) survives;
+  /property/1 returns 404 afterwards.
+- Live UI: first click arms the button ("Click again to confirm",
+  filled red, alert icon); second click fires POST /reset -> success
+  toast "Database reset — upload fresh documents to start over.";
+  upload history and chat transcript reset to their initial state;
+  dashboard shows the fresh "No property with this ID yet" card.
+- DB after reset: properties=0, images=0, inspections=0, contractors=5.
+  Pinecone warranty namespace intentionally untouched so /chat keeps
+  working without re-ingesting the warranty PDF.
+-> PASSED.
+
+=====================================================================
+TEST 33: New SVG brand lockup + header reset button
+---------------------------------------------------------------------
+Test name: brand_logo_and_header_reset_test
+
+Changes under test:
+- BrandLogo.vue: inline-SVG "transom fanlight" mark + TRANSOM /
+  PROPERTY INTELLIGENCE wordmark, colored entirely by CSS theme
+  variables (mark bg = primary, lines = card bg) so it recolors on
+  theme change with no asset swapping. Replaces the PNG pair in the
+  header (and the MutationObserver + v-if/v-else swap machinery that
+  existed only to switch between them). Sidebar's "T" badge replaced
+  with the same mark. Standalone deliverables saved to
+  design/transom-lockup-{light,dark}.svg (no "--" inside XML comments,
+  per BUGS.md #24).
+- Header reset button (user couldn't find the Settings-only one):
+  trash icon between refresh and the theme toggle, same two-step
+  confirm handler as the Settings row (arm -> "Confirm reset" label ->
+  4s auto-disarm).
+
+Bash command:
+node logo_reset_check.mjs   # Playwright, both themes
+
+Test output:
+- Dark + light screenshots: mark and wordmark render crisply in both,
+  sidebar and header marks match, no page errors.
+- Header reset: present on dashboard, arms to "Confirm reset" on first
+  click, auto-disarms after 4s (verified label returns to icon-only).
+  Confirm intentionally NOT clicked (live DB now holds the user's
+  freshly re-uploaded property data).
+-> PASSED.
+
+=====================================================================
+TEST 34: Frontend typeface matched to the brand (Inter Variable)
+---------------------------------------------------------------------
+Test name: brand_font_test
+
+Change under test: theme.css always DECLARED Inter first in the body
+font stack, but nothing ever loaded the font — every user silently got
+their system fallback. Installed @fontsource-variable/inter (self-
+hosted, bundled by Vite, no external font CDN requests), imported it in
+main.js, and updated the stack to 'Inter Variable'. Added
+font-variant-numeric: tabular-nums to tables and the price so figures
+align in columns. Side effect handled: `npm install` pruned the ad-hoc
+playwright package (it was never in package.json) — reinstalled as a
+proper devDependency.
+
+Bash command:
+node font_check.mjs   # Playwright: document.fonts inspection
+
+Test output:
+- computed body font-family: "Inter Variable"
+- document.fonts: latin subset status "loaded" (other unicode subsets
+  registered, loaded on demand)
+- document.fonts.check('13px "Inter Variable"') -> true (actually
+  rendering with Inter, not a fallback)
+- Screenshot confirms the UI, wordmark, and data tables share one
+  typeface; numerals in the renovation table align.
+-> PASSED.
+
+=====================================================================
+TEST 35: Session-gated dashboard (empty on page load, data only after
+session activity)
+---------------------------------------------------------------------
+Test name: session_gated_display_test
+
+Change under test (user request): every page load starts with an empty
+dashboard, even when the database holds data from earlier sessions.
+Property data appears only after activity in the CURRENT session — a
+successful upload, or explicitly searching a property ID. Nothing is
+deleted on refresh (an accidental F5 must not destroy uploads; the DB
+and MCP tools keep everything); the header trash button remains the way
+to actually clear stored data. Implemented as a sessionActive flag in
+App.vue: no fetch on mount, refreshProperty() no-ops until the session
+is active, manual refresh before activity shows an explanatory toast,
+and a successful reset returns the session to its idle state.
+
+Bash command:
+node session_gate_check.mjs   # Playwright, DB pre-loaded with data
+
+Test output:
+1. Fresh load with populated DB -> 0 renovation rows, card shows
+   "No property data yet — upload photos, a blueprint, ...".
+2. Refresh-arrow click before any activity -> toast "Fresh session —
+   upload documents (or search a property ID) to load data", still empty.
+3. Search jump to "1" -> full data appears (8 renovation rows, $316,944).
+4. F5 -> empty dashboard again.
+5. sqlite3 check afterwards: DB untouched (1 property, value 316944).
+-> PASSED.

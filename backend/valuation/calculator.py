@@ -27,6 +27,10 @@ def calculate_base_value(sqft, year_built, price_per_sqft,
     Effective Age defaults to Actual Age (current_year - year_built) since
     no renovation-adjusted effective age is tracked here.
     """
+    if sqft is None or sqft <= 0:
+        raise ValueError(f"sqft must be a positive number, got {sqft!r}")
+    if year_built is None or year_built > current_year:
+        raise ValueError(f"year_built must be <= {current_year}, got {year_built!r}")
     age = current_year - year_built
     age_factor = max(1 - (depreciation_rate * age), 0.60)
     return round(price_per_sqft * sqft * age_factor, 2)
@@ -44,14 +48,25 @@ def calculate_renovation_impact(base_value, renovations, local_median_ppsf,
     total_uplift = 0
     total_cost = 0
     for r in renovations:
-        cat = r["category"]
+        cat = r.get("category")
+        if cat not in ROI_TABLE:
+            # Callers (notably the MCP calculate_renovation_roi tool) pass
+            # freeform renovation lists — name the valid categories instead
+            # of surfacing a bare KeyError.
+            raise ValueError(
+                f"Unknown renovation category {cat!r}. "
+                f"Valid categories: {', '.join(sorted(ROI_TABLE))}")
+        cost = r.get("cost")
+        if not isinstance(cost, (int, float)) or cost < 0:
+            raise ValueError(
+                f"Renovation {cat!r} needs a non-negative numeric 'cost', got {cost!r}")
         mult = ROI_TABLE[cat]["multiplier"]
-        uplift = r["cost"] * mult
+        uplift = cost * mult
         total_uplift += uplift
-        total_cost += r["cost"]
+        total_cost += cost
         breakdown.append({
             "category": cat,
-            "cost": r["cost"],
+            "cost": cost,
             "value_uplift": round(uplift, 2),
             "roi_percent": round(mult * 100, 1),
             "priority": ROI_TABLE[cat]["priority"]

@@ -186,15 +186,13 @@ The checkbox glyph (☐/☑) and any checkmark are dropped in the markdown conve
 
 **Verified:** Nearly all fields now extract correctly (floor type/condition, wood grade, paint, roof, HVAC age, kitchen, bathroom) against the real filled form — see `tests/test_log.txt`.
 
-### 13. (Known limitation, not fixed) `renovation_cost_estimate` — cost ranges occasionally misredacted as PHONE_NUMBER
+### 13. (Originally: known limitation, not fixed — now fixed, see #26) `renovation_cost_estimate` — cost ranges occasionally misredacted as PHONE_NUMBER
 
 **Symptom:** In the Vision-extracted `renovation_cost_estimate` string, two entries were corrupted: `"Flooring refinish: [PHONE_NUMBER_XXXXXX] USD"` instead of `"4000-9000 USD"`. Presidio's phone-number recognizer pattern-matched the digit-hyphen-digit shape (`"4000-9000"`, `"3000-7000"`) as a phone number.
 
-**Investigated fix:** Tried raising `analyzer.analyze()`'s `score_threshold` to filter low-confidence matches. Found both the false positive and a *real* phone number with no nearby context words (e.g. no "phone"/"call"/"tel" nearby) score identically at `0.4` — Presidio only boosts phone-number confidence when context clues are present. A threshold high enough to drop the false positive would also silently stop redacting real, contextless phone numbers elsewhere in the system — a worse failure mode (missed PII) than this one (corrupted cost data).
+**Investigated fix (rejected at the time):** Tried raising `analyzer.analyze()`'s `score_threshold` to filter low-confidence matches. Found both the false positive and a *real* phone number with no nearby context words (e.g. no "phone"/"call"/"tel" nearby) score identically at `0.4` — Presidio only boosts phone-number confidence when context clues are present. A threshold high enough to drop the false positive would also silently stop redacting real, contextless phone numbers elsewhere in the system — a worse failure mode (missed PII) than this one (corrupted cost data). Left `pii.py` unchanged at the time.
 
-**Decision:** Left `pii.py` unchanged. `pii.py` is a shared module used by every ingestion pipeline; a narrow fix for this one call site isn't worth the risk of weakening PII detection everywhere else.
-
-**Status:** Open / accepted trade-off. Revisit if this becomes a recurring problem — options discussed: per-call-site `context=[...]` hints to Presidio (boosts real phone matches without touching the shared default), or a stricter phone-format regex requiring realistic digit groupings.
+**Status: fixed.** See #26 — a currency-context filter (checking for "USD"/"$"/"dollars" immediately after a PHONE_NUMBER match) turned out to be a much better signal than confidence score, and doesn't carry the same risk of suppressing real phone number detection.
 
 ### 14. `graph.py` — `ValueError: 'answer' is already being used as a state key`
 
@@ -275,12 +273,164 @@ ModuleNotFoundError: No module named 'mcp.server.fastmcp'
 
 **Verified:** Re-screenshotted — full card content (title, price, address, badges, builder/year, status pin) now renders correctly in both light and dark themes.
 
+### 20. `rag_agent`'s final yes/no conclusion was not stable across identical runs of the same question
+
+**Symptom:** Re-asking "Is a 1/8 inch crack in the master bath drywall covered under warranty?" during frontend testing (Test 20) produced "No, not covered," while an earlier Milestone 5 test of the identical question concluded "would be covered" — both runs cited the same correct `§ 7` clause and retrieved the same correct source text. Only the model's final interpretation of whether exceeding a performance-standard threshold implies warranty coverage varied.
+
+**Cause:** `answer_node` asked the LLM to do two things in one uninstructed step: (1) the numeric comparison ("does 1/8 inch exceed 1/32 inch?") and (2) the coverage judgment ("does exceeding it mean it's covered?"). Even at `temperature=0`, GPT-4o isn't perfectly deterministic (a known characteristic of the API — floating-point non-associativity in batched inference), and with no explicit rule connecting "exceeds threshold" to "is covered," the model's interpretation of that connection varied run to run.
+
+**Fix — two parts:**
+1. **`backend/rag/measurement.py`** (new file): `extract_inch_measurements()` parses fraction-of-an-inch and decimal-inch measurements (e.g. "1/8 inch" → `0.125`) via regex — the Texas warranty doc's performance standards are almost entirely fraction-of-inch tolerances (drywall cracks, stucco cracks, crowning, bows/depressions, etc.), so this narrow pattern covers what actually matters for this document. `compare_measurement_to_sources()` extracts exactly one measurement from the question and a single, unambiguous threshold from the retrieved source text, and does the `>` comparison **in Python**, deterministically. Returns `None` (falls back to the model's own judgment, unchanged from before) if the question has no single clear measurement, the sources have no threshold, or multiple sources state conflicting thresholds — this only activates for the narrow, well-defined case, not general questions.
+2. **`backend/rag/graph.py`**'s `answer_node`: when a comparison is available, injects it as a `COMPUTED FACT (pre-calculated ... treat as ground truth)` line into the prompt, plus an explicit two-step reasoning rule: (1) state the computed comparison result without recomputing it, (2) apply a fixed coverage rule — exceeding a stated threshold is a covered defect per the warranty's general repair obligation, unless the sources state an explicit exclusion or the warranty period has lapsed. This removes the ambiguous, freely-interpreted connection between "exceeds threshold" and "is covered" that was previously left entirely to the model.
+
+**Verified:**
+- Same question run 5 times: all 5 runs that successfully retrieved the threshold clause concluded "covered/defect" consistently (previously flip-flopped) — see `tests/test_log.txt` Test 21.
+- Negative case tested (`1/64 inch`, which is *below* the `1/32 inch` threshold): correctly concluded "not covered" — confirms the fix isn't just biased toward always saying "covered," it's actually applying the comparison correctly in both directions.
+- One of the 5 runs still returned "not covered" with zero citations on a *different* attempt (not part of the 5-run consistency batch) — traced to a **retrieval** miss (the threshold chunk wasn't retrieved at all that run), not a reasoning failure. This is the pre-existing, separate, still-open risk noted in #15 (reranker can miss the right chunk); the fix in this entry only addresses the *reasoning* step, given the correct source was actually retrieved.
+
+### 21. `blueprint_agent.py` — bedroom/bathroom count flipped between identical uploads (4 bed/3 bath → 2 bed/1 bath)
+
+**Symptom:** Uploading `Blueprint_A102_Upper_Floor.png` through the live frontend changed `properties.bedrooms`/`bathrooms` from the previously-correct `4`/`3` down to `2`/`1`, visibly breaking the PropertyCard's badges.
+
+**Investigation — first theory (wrong):** `blueprint_agent.py`'s Mistral OCR call hardcoded `document_url: "data:application/pdf;base64,..."` regardless of the actual uploaded file type, so a `.png` upload was mislabeled as a PDF. This looked like the obvious cause and is a real bug on its own (fixed regardless — see below), but reproducing the OCR call with the corrected `image/png` mime type still returned `bedrooms: 2, bathrooms: 1`. Diffing the raw OCR markdown output between the `.pdf` and `.png` versions of the same sheet showed **identical text** in both cases: `"BEDROOMS 3 & 4 + BATH 3"`. So mislabeling the mime type was not actually the cause of this particular discrepancy (it's still a real, separate correctness issue and was fixed).
+
+**Actual cause:** `"BEDROOMS 3 & 4 + BATH 3"` is a genuinely ambiguous label — it can be read as "this sheet shows bedroom #3 and #4 (of a larger numbered sequence, implying ≥4 total) plus bathroom #3" or as "there are 2 bedrooms and 1 bathroom shown here." GPT-4o's extraction step interpreted this differently across separate runs on the exact same input text — same class of run-to-run interpretation instability as #20, but for room-numbering instead of measurement thresholds.
+
+**Fix — two parts:**
+1. `blueprint_agent.py`: use `mimetypes.guess_type()` to set the correct mime type in the OCR `document_url` data URI instead of always assuming `application/pdf`. Real, independent bug fix — doesn't explain this specific discrepancy, but was wrong regardless and worth fixing.
+2. `blueprint_agent.py`'s extraction prompt: added explicit instruction that ordinal-numbered room labels (e.g. "BEDROOMS 3 & 4") indicate room numbers in the whole property's numbering sequence, not a literal count of items on that one sheet — extract the *highest* room number mentioned as the total count in that case, falling back to literal counting only when no such numbering convention is present.
+
+**Verified:** Re-ran `process_blueprint()` against the same PNG 3 times after the prompt fix — all 3 runs consistently returned `bedrooms: 4, bathrooms: 3`. Re-ingested through the live API and confirmed the frontend PropertyCard shows the correct badges again. See `tests/test_log.txt` Test 22.
+
+### 22. `inspection_parser.py` — `renovation_cost_estimate` returned a third, different JSON shape, breaking the RenovationTable
+
+**Symptom:** Re-uploading the same filled inspection form through the live frontend produced a RenovationTable with 7 rows but every cell blank (`Category` empty, `Priority` defaulting to "Low", `Est. Cost`/`ROI`/`Contractor` all "—"), even though `/property/1` had previously rendered this table correctly.
+
+**Cause:** The extraction prompt left `renovation_cost_estimate`'s JSON shape completely open-ended. Across different runs it had already been observed in two different shapes (a list of `{item, priority, est_cost, roi}` objects — Test 10; and a dict keyed by category name with `{Priority, "Est. cost ($)", "ROI (%)"}` sub-objects — Test 17). This run produced a **third** shape: a list of single-key dicts, `[{"Roof replacement": "8000-10000 USD"}, ...]`, with no priority or ROI captured at all. `get_renovation_breakdown()`'s normalizer only handled the first two shapes, so every field lookup on the third shape returned `None`.
+
+**Fix:**
+1. `inspection_parser.py`: rewrote the `renovation_cost_estimate` prompt instructions to specify **one exact, fixed JSON schema** — a list of `{category, priority, cost, roi}` objects, with an explicit example and per-field description — rather than leaving the structure to the model's discretion.
+2. `backend/db/queries.py`'s `get_renovation_breakdown()`: added a third fallback branch for the single-key-dict shape, so already-ingested rows from before this fix still render instead of going blank, while the primary path now expects the new fixed schema directly.
+
+**Verified:** Re-ran `parse_inspection_form()` 3 times after the prompt fix — all 3 runs returned the exact same fixed shape (`category`/`priority`/`cost`/`roi` keys) consistently. Re-ingested through the live API and confirmed the frontend RenovationTable renders all 7 (well, 8 — a null "Other" row is now included since the form has that row too) categories with priority chips, costs, ROI, and looked-up contractors again. See `tests/test_log.txt` Test 22.
+
+### 23. PropertyCard always showed "Value pending" — `properties.estimated_value` was never computed by anything
+
+**Symptom:** User asked why the dashboard always showed "Value pending" instead of a real price, even for a property with `sqft`, `year_built`, `bedrooms`, and `bathrooms` all populated.
+
+**Cause:** The valuation module (`backend/valuation/calculator.py`, built and unit-tested in Milestone 4) was only ever wired into the MCP tools (`estimate_property_value`, `calculate_renovation_roi`) — nothing in the ingestion pipeline called it or wrote a result back into `properties.estimated_value`/`price_per_sqft`. Those columns stayed `NULL` forever regardless of how much data had been ingested.
+
+**Fix:** Added `_maybe_update_estimated_value()` to `backend/db/queries.py`: after either `save_blueprint_fields()` or `save_inspection_form()` runs, it checks whether the property now has both `sqft` and `year_built`, and if so computes `estimated_value` via the same `calculate_base_value()` used by the MCP tools (using the `fetch_local_ppsf()` stub — same $180/sqft illustrative default documented in that function, not a real market lookup) and persists it. Called from both save functions since either one could be the one that completes the pair (blueprint usually supplies `sqft`, inspection form usually supplies `year_built`).
+
+**Verified:** Ran against property #1 (`sqft=2201, year_built=2006`) — `estimated_value` correctly computed as `$316,944` (same figure as the earlier direct MCP tool test), confirmed live in the dashboard (PropertyCard now shows "$316,944" instead of "Value pending").
+
+**Scope note:** Like the MCP tools, this is still using the `fetch_local_ppsf()` stub — a real integration would need actual local comp data per the source PDF's own explicit warning against using a statewide average.
+
+### 24. New SVG logo — dark variant rendered as a broken image (`naturalWidth: 0`)
+
+**Symptom:** After recreating the `design/` PNG logo as light/dark SVG variants and wiring a theme-based swap into `App.vue`, the light variant rendered correctly but the dark variant showed a broken-image icon. `img.naturalWidth` evaluated to `0` in the browser despite the file serving `200 OK` with valid-looking SVG content via `curl`.
+
+**Cause:** The dark SVG's descriptive comment referenced CSS custom property names directly: `<!-- ... --color-primary (#00CFFF) ... --color-text-main (#E0E0E0) ... -->`. XML/SVG comments cannot contain a literal `--` anywhere except at the comment's opening/closing delimiters — `--color-primary` starts with `--`, which is invalid. `curl` doesn't parse/validate XML, so the raw bytes looked fine there; the browser's XML parser (invoked when an SVG is loaded as a standalone document via `<img src>`) treated the malformed comment as a fatal parse error and rendered nothing. The light variant's comment happened not to contain a `--` sequence, so it worked by accident.
+
+**Secondary issue found while fixing this:** the theme-swap mechanism itself was also broken independently — see below.
+
+**Fix:** Reworded the dark SVG's comment to avoid any `--` sequence (described the CSS token purpose in prose instead of naming the literal `--color-*` custom property).
+
+**Verified:** `img.naturalWidth` now evaluates to `255` (a real decoded image) in both themes; screenshots confirm the dark variant renders the icon in the app's dark-mode accent color (`#00CFFF`) with a legible light wordmark.
+
+### 25. Theme-based logo swap didn't work — Vue scoped CSS `:global()` selector silently dropped
+
+**Symptom:** Independent of bug #24's XML issue, the CSS meant to show/hide the light-vs-dark `<img>` based on `[data-theme]` never applied at all — inspecting the live page after toggling dark mode showed `.logo-light` still `display: block` and `.logo-dark` still `display: none`, i.e. no swap happened.
+
+**Cause:** The CSS was written as `:global([data-theme='dark']) .logo-light { display: none; }` inside a Vue SFC `<style scoped>` block, intending "when `<html data-theme=dark>`, hide the light logo." Inspecting the actual compiled stylesheet in the browser showed this rule (and its `.logo-dark` counterpart) were missing entirely — only the unconditional `.logo-dark[data-v-xxx] { display: none }` default survived compilation. Vite's Vue SFC compiler doesn't reliably support `:global(selector) .scopedClass` as a descendant combinator in this position; it silently dropped the rule instead of erroring.
+
+**Fix:** Replaced the CSS-only approach with a small piece of reactive state in `App.vue`: a `MutationObserver` watches `<html>`'s `data-theme` attribute (which `ThemeToggle.vue` sets directly, with no prop/emit connection to the parent) and updates an `isDarkMode` ref, which then drives a `v-if`/`v-else` between the two `<img>` tags — plain Vue reactivity instead of relying on scoped-CSS global-selector edge cases.
+
+**Verified:** Same test as #24 — `naturalWidth` and screenshots confirm the correct variant now renders in each theme, and toggling between them live in the browser swaps the image immediately.
+
+### 26. `pii.py` — fixed the PHONE_NUMBER false positive on currency ranges (#13) via context, not confidence
+
+**Approach (suggested by user, based on observing the actual data):** a real phone number is essentially never directly followed by "USD"/"$"/"dollars." Rather than trying to distinguish false positives by confidence score (rejected in #13 — both cases scored identically), check the text immediately after each `PHONE_NUMBER` match for a currency marker, and skip redacting that specific match if one is found.
+
+**Fix:** Added `_looks_like_currency()` to `backend/redaction/pii.py` — a small regex checking the ~12 characters after a match for `USD`/`$`/`dollars` (case-insensitive). `redact_and_tokenize()` now filters `PHONE_NUMBER` results through this check before building the token map, so currency-adjacent digit-hyphen-digit spans are left alone while everything else is unaffected. This only touches `PHONE_NUMBER` matches with that specific adjacent context — it doesn't change confidence scoring or any other entity type, so it can't reintroduce the risk identified in #13 (suppressing real, contextless phone number redaction elsewhere).
+
+**Verified:**
+- `"4000-9000 USD"` / `"3000-7000 USD"` → no longer redacted (unit test + full `parse_inspection_form()` re-run against the real inspection form — all 7 renovation cost ranges came back clean).
+- `"214-555-0199"` with no currency context → still correctly redacted (confirms the filter is specific to the currency-adjacent case, not a blanket exemption).
+- Confirmed live: re-ingested through the running API, `/property/1`'s renovation breakdown now shows real dollar amounts instead of `[PHONE_NUMBER_...]` placeholders.
+
+### 27. `blueprint_agent.py` — extraction returned `0` instead of `null` for bedrooms/bathrooms on a sheet with no room info, clobbering good data
+
+**Symptom:** Re-ingesting the Ground Floor blueprint (which has no bedroom/bathroom info — see #21) after the room-numbering prompt fix caused `properties.bedrooms`/`bathrooms` to drop from the correct `4`/`3` (set earlier by the Upper Floor sheet) down to `0`/`0`.
+
+**Cause:** The room-numbering fix from #21 added instructions about *counting* rooms, and GPT-4o apparently started interpreting "no bedroom info on this sheet" as "0 bedrooms" rather than "unknown/not applicable" for some runs. Since `0` is not `NULL`, `save_blueprint_fields()`'s `COALESCE(?, existing)` treated it as real data and overwrote the correct `4`/`3` with `0`/`0`.
+
+**Fix — two parts, defense in depth (given this exact field has now caused two separate incidents — #21 and this one):**
+1. `blueprint_agent.py`: added an explicit instruction that a sheet with no bedroom/bathroom/sqft info must return `null` for those fields, not `0` — a partial sheet isn't "a home with zero bedrooms."
+2. `backend/db/queries.py`'s `save_blueprint_fields()`: changed `COALESCE(?, existing)` to `COALESCE(NULLIF(?, 0), existing)` for `sqft`/`bedrooms`/`bathrooms`, so even if the model returns `0` again in the future, the persistence layer won't let it clobber a real existing count. Not relying on the prompt alone this time.
+
+**Verified:** Manually repaired the corrupted `bedrooms`/`bathrooms` values in the live DB, restarted the backend to load both fixes, then re-ingested the Ground Floor blueprint through the real API — correctly returned `bedrooms: null, bathrooms: null` this time, and the existing `4`/`3` from the Upper Floor sheet stayed intact. Confirmed live in the dashboard.
+
+### 28. `pii.py` — all matches of one entity type collapsed into a single token, corrupting de-tokenization (found in robustness review)
+
+**Symptom (latent — found by code review, then reproduced in a unit test):** with two different people in one document ("Inspector John Smith met the owner, Mary Johnson"), both names were redacted to the *same* token, and `de_tokenize()` restored both to whichever name was processed last. Two distinct people silently became one; the "unique token per match" design was broken in practice.
+
+**Cause:** the code generated a unique token per match but handed them to Presidio's anonymizer via `operators[r.entity_type] = OperatorConfig(...)` — a dict keyed by entity *type*, not per match. Each new PERSON match overwrote the previous operator, so the anonymizer replaced every PERSON span with the last-generated token. The token map still contained all tokens, but only one ever appeared in the text (the rest were orphans), and reversal mapped it to only one original value.
+
+**Fix:** dropped `presidio_anonymizer` for the replacement step entirely — the analyzer already reports exact spans, so `redact_and_tokenize()` now splices each match's own token directly into the text (iterating spans from the end backwards so offsets stay valid). Added `_drop_overlaps()` to keep only the highest-scoring match when Presidio reports overlapping spans, since splicing two tokens into overlapping ranges would garble the text.
+
+**Verified:** `tests/unit/test_pii.py` — the two-person round trip now restores both names exactly; all person tokens in the redacted text are unique. Email/phone round trip and the #26 currency filter re-verified in the same suite.
+
+### 29. `preprocess.py` — `str.replace(".", "_safe.")` broke on filenames with extra dots; unreadable images crashed with an opaque OpenCV error
+
+**Symptom (latent):** `blur_faces_and_plates()` built its output path with `image_path.replace(".", "_safe.")`, which replaces *every* dot — `kitchen.v2.jpg` became `kitchen_safe.v2_safe.jpg`, and any dot in a directory name corrupted the path outright. Separately, `cv2.imread()` returns `None` (no exception) for missing/corrupt files, so a bad upload crashed later inside `detectMultiScale` with an unrelated-looking OpenCV assertion.
+
+**Fix:** output path now built with `os.path.splitext` (via a shared `safe_output_path()` helper, also used by `main.py` — see #32); explicit `ValueError` with the filename when `imread` returns `None`; `imwrite`'s return value checked.
+
+### 30. `main.py` — uploads written to `/tmp/{file.filename}`: path traversal + silent overwrite between uploads
+
+**Symptom (latent, security-relevant):** the multipart `filename` field is client-controlled, and it was interpolated directly into `/tmp/{filename}` — a crafted name like `../../some/path` escaped the directory, and two uploads sharing a name overwrote each other mid-processing.
+
+**Fix:** uploads now spool to `tempfile.gettempdir()/transom_{uuid4}{ext}`, keeping only the file *extension* from the client (validated against a per-doc-type allowlist first — photos: jpg/jpeg/png/webp; blueprints: those + pdf; inspection: pdf only, since PyMuPDF page-rendering is the pipeline). Unsupported types get a `415` naming the allowed extensions. Spooled files are deleted after processing. Also in the same hardening pass: ingest/chat endpoints changed from `async def` to `def` so their multi-second synchronous OCR/Vision/RAG work runs in FastAPI's threadpool instead of blocking the event loop; agent failures map to `502` with the actual reason instead of a bare 500 stack; `/property/{id}` returns a proper `404` for unknown IDs; blank chat messages get `422`; CORS narrowed from `*` to the two Vite dev origins.
+
+**Verified:** live curl tests — `.txt` upload → `415` with allowlist in the message; `filename=../../etc/cron.pdf` → spooled safely to a uuid temp path, then failed as a clean 502 ("Failed to open file … as type pdf") with no DB rows written. Endpoint suite in `tests/unit/test_api.py` pins all of these.
+
+### 31. `RenovationTable.vue` — contractor dropdown reset to the first option on every sort/re-render
+
+**Symptom:** picking a contractor in a row's dropdown, then sorting or filtering the table, snapped the selection back to the first option.
+
+**Cause:** a read/write key mismatch — the selected value was *written* under the mapped contractor-category key (`CATEGORY_MAP[...]`, e.g. "Kitchen & Bathroom Updates") but *read back* under the row's own category key (e.g. "kitchen remodel"), so the read never found the stored choice and fell back to `options[0]`.
+
+**Fix:** reads and writes both key by the row's lowercased category via one `rowKey()` helper.
+
+### 32. `main.py` refactor briefly broke photo persistence — caught by the live E2E run, then pinned with endpoint tests
+
+**Symptom:** during this hardening pass, the new shared `_run_ingestion()` helper called every save function as `save(property_id, result)` — but `save_photo_assessment` takes `(property_id, image_path, assessment)`. Photo uploads 500'd (and, because unhandled 500s bypass the CORS middleware's headers, the browser reported it as "could not reach the API" rather than a server error). A second, subtler issue: the spooled upload is now deleted after processing, so persisting *its* path in `property_images.image_path` (the old behavior) would have left a dangling reference.
+
+**Fix:** `_run_ingestion()` passes `(property_id, result, spooled_path)` to a per-endpoint save lambda; the photo endpoint persists `safe_output_path(spooled_path)` — the blurred `_safe` sibling that the preprocessing step writes and keeps — instead of the deleted original.
+
+**Verified:** live upload through the real UI → success toast, and `property_images` row stores the `…_safe.jpeg` path with the assessment fields. `tests/unit/test_api.py::test_photo_ingest_persists_safe_image_path` pins the wiring (with the vision agent mocked, so it runs without API keys).
+
+### 33. RAG agent answered "not covered" for a plainly covered defect — three compounding flaws in the graph
+
+**Symptom:** "Is a 1/8 inch crack in the drywall covered?" — previously verified to answer yes with a § 7 citation — now returned a bare `"not covered"` with no citations, consistently.
+
+**Cause (three layers, found by running the graph node-by-node):**
+1. **The relevance grader was deterministically wrong.** `gpt-4o-mini`, asked "Are these docs relevant? YES or NO" over the concatenated excerpts, answered NO every time — even though the § 7 drywall-crack clause was the top retrieval. It appeared to anchor on the first (stucco) excerpt. That sent every request into the rewrite loop.
+2. **`rewrite_node` overwrote the user's question.** Each rewrite replaced `state["question"]` itself, so after two loops the answer node answered a twice-mutated paraphrase — and the #20 measurement comparison ran against that mutated text too. Retrieval on the rewritten query also surfaced worse chunks.
+3. **The #20 computed fact never fired on real retrievals.** `compare_measurement_to_sources()` required *all* inch values in the combined context to agree, but real retrieved context mixes thresholds from several performance standards (stucco 1/8", ceiling bows 1/2", drywall cracks 1/32", crowning 1/4") — so the deterministic comparison returned `None` and the yes/no conclusion was back to unaided LLM judgment, which flip-flopped (1 of 3 runs concluded "not covered" even *after* fixes 1–2).
+
+**Fix:**
+1. `grade_node` now numbers each excerpt (with its section header) and asks *which* excerpts help, answering NONE if none do — forcing per-excerpt consideration. Verified 3/3 correct on the drywall question and 2/2 NONE on an off-topic control before adopting.
+2. Added a separate `retrieval_query` state field: rewrites only ever update the search query; `question` stays what the user asked, for both grading and answering.
+3. `compare_measurement_to_sources()` now narrows deterministically before requiring agreement: first to sentences mentioning *all* the question's subject nouns (e.g. "crack" + "drywall" → § 7(c) only), then any subject noun, then the whole text — taking the first level that yields exactly one threshold value, else `None` as before.
+
+**Verified:** 5/5 consecutive live `/chat` runs answer "covered" with the computed fact (0.125" > 0.03125") and a `§ 7` citation; the 1/64" variant correctly answers within-tolerance/not covered; the off-topic car question still answers "not covered". Sentence-scoping logic pinned in `tests/unit/test_measurement.py` with the real mixed-threshold text.
+
 ## Open
 
-_13. `pii.py` phone-number recognizer can misflag numeric cost ranges (e.g. "4000-9000") as PHONE_NUMBER when no context words are present — accepted trade-off, not fixed (see #13 above)._
-
-_15b. RAG answer grounding is improved but not guaranteed — no automated check yet confirms a generated citation's section number actually appears in the chunks that were retrieved for that answer (see #15 residual risk)._
+_15b. RAG answer grounding is improved but not guaranteed — no automated check yet confirms a generated citation's section number actually appears in the chunks that were retrieved for that answer (see #15 residual risk). This is also why #20's fix can't help on runs where retrieval itself misses the relevant chunk — the reasoning fix only kicks in once the right source is actually in context._
 
 _17b. `save_inspection_form()` doesn't extract `inspector_name_token`/`inspection_date`/`total_reno_cost` — the current inspection_parser.py prompt only pulls condition/checkbox fields, not the inspector-identity fields or a parsed cost total. `total_reno_cost` is left null; the full per-category cost breakdown is still available in `parsed_fields` JSON._
 
-_20. `rag_agent`'s final yes/no conclusion is not stable across identical runs of the same question — re-asking "Is a 1/8 inch crack in the master bath drywall covered under warranty?" during frontend testing produced "No, not covered" versus the earlier Milestone 5 test's "would be covered," both citing the same correct § 7 clause. The retrieved source text and citation are grounded correctly; only the model's final interpretation of whether exceeding a performance standard implies warranty coverage varies. Not fixed — flagged as a real consistency limitation for a legal/warranty use case, on top of the grounding risk already noted in #15._
+_20b. The measurement-comparison fix (#20, extended in #33) only covers fraction/decimal-of-an-inch comparisons — the one pattern that recurs throughout this specific warranty document. Other numeric comparison types (percentages, year counts, dollar amounts) in other documents would still rely on the LLM's unstructured reasoning and could exhibit the same kind of run-to-run inconsistency. Not generalized further since no other case has been observed in testing yet._

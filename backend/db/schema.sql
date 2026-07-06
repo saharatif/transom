@@ -96,4 +96,5 @@ INSERT INTO renovation_companies (category, company_name, website, location, pho
 ('Curb Appeal & Exterior Upgrades', 'Power HRG', 'https://www.powerhrg.com/', 'McKinney, TX', '214-306-7611'),
 ('Kitchen & Bathroom Updates', 'Spruced - Decorating Den', 'https://spruced.decoratingden.com/', 'Dallas, TX', '(214) 516-7677'),
 ('Flooring & Square Footage Upgrades', 'EFS Flooring and Remodeling', 'https://www.efsflooringandremodeling.com/', 'Irving, TX', '(972) 330-7615'),
-('Essential System & Energy Updates', 'Kohler Home Energy', 'https://www.kohlerhomeenergy.rehlko.com/', 'Nationwide', '1-844-731-7989');
+('Essential System & Energy Updates', 'Kohler Home Energy', 'https://www.kohlerhomeenergy.rehlko.com/', 'Nationwide', '1-844-731-7989'),
+('Interior Painting', 'That 1 Painter', 'https://that1painter.com/dallas', 'Richardson, TX', '(214) 432-4636');

@@ -38,3 +38,6 @@ opentelemetry-semantic-conventions>=0.63b1
 
 # MCP
 mcp>=1.28.1
+
+# Testing (dev)
+pytest>=9.1.1

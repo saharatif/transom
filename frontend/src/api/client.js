@@ -1,37 +1,75 @@
 // Use 127.0.0.1, not localhost — on this system "localhost" resolves to
 // ::1 (IPv6) first, but uvicorn only binds IPv4, so browsers/Node's fetch
-// attempt the IPv6 route and get ERR_CONNECTION_RESET. See BUGS.md.
+// attempt the IPv6 route and get ERR_CONNECTION_RESET. See BUGS.md #18.
 const API = 'http://127.0.0.1:8000'
 
-export async function uploadFile(endpoint, propertyId, file) {
+export class ApiError extends Error {
+  constructor(message, status) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+  }
+}
+
+// Ingestion runs a multi-second OCR/Vision pipeline and chat runs a full
+// RAG graph — those get a long budget; simple reads should fail fast.
+const READ_TIMEOUT_MS = 15_000
+const PIPELINE_TIMEOUT_MS = 240_000
+
+async function request(path, { method = 'GET', body, timeoutMs = READ_TIMEOUT_MS } = {}) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  let res
+  try {
+    res = await fetch(`${API}${path}`, { method, body, signal: controller.signal })
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      throw new ApiError(`Request timed out after ${Math.round(timeoutMs / 1000)}s`, 0)
+    }
+    throw new ApiError('Could not reach the Property Intelligence API — is the backend running on :8000?', 0)
+  } finally {
+    clearTimeout(timer)
+  }
+
+  if (!res.ok) {
+    // FastAPI puts human-readable failure reasons in {"detail": ...} —
+    // surface that instead of a bare status code.
+    let detail = ''
+    try {
+      const data = await res.json()
+      detail = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail)
+    } catch {
+      /* non-JSON error body */
+    }
+    throw new ApiError(detail || `Request failed (${res.status})`, res.status)
+  }
+  return res.json()
+}
+
+export function uploadFile(endpoint, propertyId, file) {
   const form = new FormData()
   form.append('property_id', propertyId)
   form.append('file', file)
-  const res = await fetch(`${API}/ingest/${endpoint}`, {
-    method: 'POST',
-    body: form,
+  return request(`/ingest/${endpoint}`, {
+    method: 'POST', body: form, timeoutMs: PIPELINE_TIMEOUT_MS,
   })
-  if (!res.ok) throw new Error(`Upload failed: ${res.status}`)
-  return res.json()
 }
 
-export async function getProperty(propertyId) {
-  const res = await fetch(`${API}/property/${propertyId}`)
-  if (!res.ok) throw new Error(`Fetch property failed: ${res.status}`)
-  return res.json()
+export function getProperty(propertyId) {
+  return request(`/property/${propertyId}`)
 }
 
-export async function getContractors(category) {
-  const res = await fetch(`${API}/contractors?category=${encodeURIComponent(category)}`)
-  if (!res.ok) throw new Error(`Fetch contractors failed: ${res.status}`)
-  return res.json()
+export function getContractors(category) {
+  return request(`/contractors?category=${encodeURIComponent(category)}`)
 }
 
-export async function sendChat(propertyId, message) {
+export function resetDatabase() {
+  return request('/reset', { method: 'POST' })
+}
+
+export function sendChat(propertyId, message) {
   const form = new FormData()
   form.append('property_id', propertyId)
   form.append('message', message)
-  const res = await fetch(`${API}/chat`, { method: 'POST', body: form })
-  if (!res.ok) throw new Error(`Chat failed: ${res.status}`)
-  return res.json()
+  return request('/chat', { method: 'POST', body: form, timeoutMs: PIPELINE_TIMEOUT_MS })
 }

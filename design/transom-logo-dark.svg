@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 340 200" role="img" aria-labelledby="transomLogoDarkTitle">
+  <title id="transomLogoDarkTitle">Transom</title>
+  <!-- Icon: three ascending columns under a rising diagonal beam,
+       recreated as clean vector shapes from design/Gemini_..._logo.png.
+       Colors match this app's dark theme tokens (theme.css): the
+       primary accent color for the mark, the main text color for the
+       wordmark, so the logo sits correctly on a dark background. -->
+  <g>
+    <rect x="24"  y="80"  width="28" height="48" fill="#00CFFF" />
+    <rect x="70"  y="56"  width="28" height="72" fill="#00CFFF" />
+    <rect x="116" y="30"  width="28" height="98" fill="#00CFFF" />
+    <polygon points="14,86 208,4 208,26 34,108" fill="#00CFFF" />
+  </g>
+  <!-- Wordmark -->
+  <text x="170" y="180"
+        font-family="Arial, Helvetica, sans-serif"
+        font-size="44"
+        font-weight="700"
+        letter-spacing="4"
+        fill="#E0E0E0"
+        text-anchor="middle">TRANSOM</text>
+</svg>

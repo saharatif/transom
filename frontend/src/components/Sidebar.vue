@@ -1,42 +1,51 @@
 <script setup>
+import AppIcon from './AppIcon.vue'
+import BrandLogo from './BrandLogo.vue'
+
 defineProps({
-  activeTab: { type: String, default: 'properties' },
+  activeTab: { type: String, default: 'dashboard' },
 })
 defineEmits(['select'])
 
+// Only nav items that map to something real in the app — no Portfolio /
+// Clients / Reports placeholders for pages that don't exist yet.
 const navItems = [
-  { id: 'properties', label: 'Properties', icon: '\u{1F3E0}' },
-  { id: 'clients', label: 'Clients', icon: '\u{1F465}' },
-  { id: 'chat', label: 'Chat', icon: '\u{1F4AC}' },
-  { id: 'upload', label: 'Upload', icon: '\u{2B06}\u{FE0F}' },
+  { id: 'dashboard', label: 'Dashboard', icon: 'home' },
+  { id: 'upload', label: 'Upload', icon: 'upload' },
+  { id: 'chat', label: 'Chat', icon: 'chat' },
 ]
-const settingsItem = { id: 'settings', label: 'Settings', icon: '\u{2699}\u{FE0F}' }
+const settingsItem = { id: 'settings', label: 'Settings', icon: 'settings' }
 </script>
 
 <template>
   <nav class="sidebar" aria-label="Primary navigation">
-    <div class="sidebar-brand" aria-hidden="true">V</div>
+    <div class="sidebar-brand">
+      <BrandLogo :size="32" :show-text="false" />
+      <span class="brand-name">Transom</span>
+    </div>
 
     <ul class="sidebar-nav">
       <li v-for="item in navItems" :key="item.id">
         <button
           class="nav-btn"
           :class="{ active: activeTab === item.id }"
-          :aria-label="item.label"
           :aria-current="activeTab === item.id ? 'page' : undefined"
           @click="$emit('select', item.id)"
         >
-          <span class="nav-icon" aria-hidden="true">{{ item.icon }}</span>
+          <span class="nav-icon"><AppIcon :name="item.icon" :size="16" /></span>
+          <span class="nav-label">{{ item.label }}</span>
         </button>
       </li>
     </ul>
 
     <button
       class="nav-btn settings-btn"
-      :aria-label="settingsItem.label"
+      :class="{ active: activeTab === settingsItem.id }"
+      :aria-current="activeTab === settingsItem.id ? 'page' : undefined"
       @click="$emit('select', settingsItem.id)"
     >
-      <span class="nav-icon" aria-hidden="true">{{ settingsItem.icon }}</span>
+      <span class="nav-icon"><AppIcon :name="settingsItem.icon" :size="16" /></span>
+      <span class="nav-label">{{ settingsItem.label }}</span>
     </button>
   </nav>
 </template>
@@ -45,26 +54,27 @@ const settingsItem = { id: 'settings', label: 'Settings', icon: '\u{2699}\u{FE0F
 .sidebar {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  width: 64px;
-  min-width: 64px;
+  width: 200px;
+  min-width: 200px;
   height: 100%;
   background-color: var(--color-bg-sidebar);
   border-right: 1px solid var(--color-border);
-  padding: 16px 0;
+  padding: 20px 12px;
 }
 
 .sidebar-brand {
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
-  background-color: var(--color-primary);
-  color: #fff;
   display: flex;
   align-items: center;
-  justify-content: center;
+  gap: 10px;
+  padding: 0 8px;
+  margin-bottom: 28px;
+}
+
+.brand-name {
   font-weight: 700;
-  margin-bottom: 24px;
+  font-size: var(--text-md);
+  letter-spacing: 0.02em;
+  color: var(--color-text-main);
 }
 
 .sidebar-nav {
@@ -73,34 +83,47 @@ const settingsItem = { id: 'settings', label: 'Settings', icon: '\u{2699}\u{FE0F
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 4px;
   flex: 1;
 }
 
 .nav-btn {
-  width: 40px;
-  height: 40px;
-  border: none;
-  border-radius: 8px;
-  background: transparent;
+  width: 100%;
   display: flex;
   align-items: center;
-  justify-content: center;
-  opacity: 0.55;
-  transition: opacity 0.2s ease, background-color 0.2s ease;
+  gap: 10px;
+  padding: 9px 10px;
+  border: none;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: var(--text-base);
+  text-align: left;
+  transition: opacity 0.2s ease, background-color 0.2s ease, color 0.2s ease;
 }
 
 .nav-btn:hover {
-  opacity: 0.85;
+  background-color: color-mix(in srgb, var(--color-primary) 8%, transparent);
+  color: var(--color-text-main);
 }
 
 .nav-btn.active {
-  opacity: 1;
+  color: var(--color-primary);
   background-color: color-mix(in srgb, var(--color-primary) 15%, transparent);
+  font-weight: 600;
 }
 
 .nav-icon {
-  font-size: 18px;
+  display: flex;
+  width: 20px;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.nav-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .settings-btn {

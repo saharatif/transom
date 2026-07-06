@@ -1,5 +1,6 @@
 <script setup>
 import { ref, onMounted } from 'vue'
+import AppIcon from './AppIcon.vue'
 
 const isDarkMode = ref(false)
 
@@ -10,9 +11,11 @@ const toggleTheme = () => {
 }
 
 onMounted(() => {
-  const savedTheme = localStorage.getItem('theme') || 'light'
+  // index.html's inline script already applies the saved/default theme
+  // before Vue mounts (avoids a flash of the wrong theme) — this just
+  // syncs the toggle's own visual state to match.
+  const savedTheme = document.documentElement.getAttribute('data-theme') || 'dark'
   isDarkMode.value = savedTheme === 'dark'
-  document.documentElement.setAttribute('data-theme', savedTheme)
 })
 </script>
 
@@ -26,7 +29,7 @@ onMounted(() => {
   >
     <span class="track">
       <span class="thumb" :class="{ 'thumb-dark': isDarkMode }">
-        {{ isDarkMode ? '\u{1F319}' : '\u{2600}\u{FE0F}' }}
+        <AppIcon :name="isDarkMode ? 'moon' : 'sun'" :size="12" />
       </span>
     </span>
   </button>
@@ -56,6 +59,7 @@ onMounted(() => {
   height: 20px;
   border-radius: 50%;
   background-color: var(--color-primary);
+  color: #fff;
   display: flex;
   align-items: center;
   justify-content: center;

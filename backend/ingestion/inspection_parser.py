@@ -1,6 +1,7 @@
-import base64, json, os
+import base64
 import fitz  # PyMuPDF
 from openai import OpenAI
+from .llm_json import parse_llm_json
 from ..redaction.pii import redact_and_tokenize
 import logfire
 
@@ -59,6 +60,20 @@ header at the top of the form (handwritten). Use the label text of each
 checked box as the value for the condition fields (e.g. "Engineered
 hardwood" for floor_type). If a field wasn't checked, filled in, or is
 illegible, use null.
+
+renovation_cost_estimate MUST be a JSON array using EXACTLY this shape for
+every row of the "RENOVATION COST ESTIMATE" table (§8), with no other
+shape or nesting — one object per renovation category:
+[
+  {"category": "Roof replacement", "priority": 1, "cost": "8000-10000 USD", "roi": "140%"},
+  {"category": "HVAC system", "priority": 1, "cost": "5000-10000 USD", "roi": "120%"}
+]
+"category" is the row label exactly as printed. "priority" is the
+handwritten number in that column (integer, or null if blank).
+"cost" is the handwritten "Est. cost ($)" value as a string (or null).
+"roi" is the printed/handwritten "ROI (%)" value as a string (or null).
+Include a row for every category printed in the table even if some of its
+cells are blank — use null for any cell that wasn't filled in.
 """})
 
     # 2. Vision analysis — single call across all pages so the model has
@@ -67,9 +82,9 @@ illegible, use null.
         model="gpt-4o",
         messages=[{"role": "user", "content": content}],
     )
-    raw = resp.choices[0].message.content.replace("```json", "").replace("```", "")
+    raw = resp.choices[0].message.content
 
     # 3. Redact any PII in the text output (inspector name, license number)
     # before it's stored.
     clean = redact_and_tokenize(raw, doc_id, db_path)
-    return json.loads(clean)
+    return parse_llm_json(clean)

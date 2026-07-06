@@ -38,6 +38,11 @@ def calculate_renovation_roi(property_id: str, renovations: list,
                              zip_code: str) -> dict:
     """Calculate renovation value uplift capped at neighborhood ceiling."""
     prop = get_property(property_id)
+    if prop is None:
+        return {"error": f"Property {property_id} not found"}
+    if not prop.get("sqft") or not prop.get("year_built"):
+        return {"error": f"Property {property_id} is missing sqft/year_built — "
+                         "ingest a blueprint and inspection form first"}
     ppsf = fetch_local_ppsf(zip_code)
     base = calculate_base_value(prop["sqft"], prop["year_built"], ppsf)
     return calculate_renovation_impact(base, renovations, ppsf, prop["sqft"])
@@ -53,8 +58,8 @@ def get_contractors(category: str) -> dict:
 def get_warranty_coverage(property_id: str, question: str) -> dict:
     """Search the warranty document (RAG) for coverage on an issue."""
     result = rag_agent.invoke({
-        "question": question, "property_id": property_id,
-        "doc_type": "warranty", "documents": [],
+        "question": question, "retrieval_query": "",
+        "property_id": property_id, "doc_type": "warranty", "documents": [],
         "is_relevant": False, "answer": "", "citations": [], "iterations": 0})
     return {"answer": result["answer"], "citations": result["citations"]}
 

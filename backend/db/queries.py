@@ -1,16 +1,26 @@
 import json
 import os
 import sqlite3
+from contextlib import contextmanager
+
+from ..valuation.calculator import calculate_base_value
 
 
-def _connect():
-    """Connect using DATABASE_PATH from the environment, same convention
-    as setup_db.py — callers (MCP tools) don't pass a db_path explicitly.
+@contextmanager
+def _db():
+    """Connection scope using DATABASE_PATH from the environment, same
+    convention as setup_db.py — callers (MCP tools) don't pass a db_path
+    explicitly. Commits on success; always closes, so an exception mid-
+    query can't leak the handle or hold a write lock open.
     """
     db_path = os.environ.get("DATABASE_PATH", "./property_intel.db")
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def ensure_property_exists(property_id: int):
@@ -20,11 +30,9 @@ def ensure_property_exists(property_id: int):
     the property's core fields. properties.id is INTEGER PRIMARY KEY, so
     property_id must be a real integer, not an arbitrary string.
     """
-    conn = _connect()
-    conn.execute(
-        "INSERT OR IGNORE INTO properties (id) VALUES (?)", (property_id,))
-    conn.commit()
-    conn.close()
+    with _db() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO properties (id) VALUES (?)", (property_id,))
 
 
 def save_photo_assessment(property_id: int, image_path: str, assessment: dict):
@@ -34,22 +42,45 @@ def save_photo_assessment(property_id: int, image_path: str, assessment: dict):
     blueprint/inspection-sourced assessments of the same property.
     """
     ensure_property_exists(property_id)
-    conn = _connect()
-    conn.execute(
-        "INSERT INTO property_images (property_id, image_path, ai_assessment, "
-        "condition_score, issues_detected, confidence) VALUES (?, ?, ?, ?, ?, ?)",
-        (property_id, image_path, json.dumps(assessment),
-         assessment.get("condition_score"),
-         json.dumps(assessment.get("visible_issues", [])),
-         assessment.get("confidence")))
-    conn.execute(
-        "INSERT INTO material_assessment (property_id, floor_type, floor_condition, "
-        "wood_species, paint_condition, source, confidence) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (property_id, assessment.get("floor_type"), assessment.get("floor_condition"),
-         assessment.get("wood_species"), assessment.get("paint_condition"),
-         "ai_photo", assessment.get("confidence")))
-    conn.commit()
-    conn.close()
+    with _db() as conn:
+        conn.execute(
+            "INSERT INTO property_images (property_id, image_path, ai_assessment, "
+            "condition_score, issues_detected, confidence) VALUES (?, ?, ?, ?, ?, ?)",
+            (property_id, image_path, json.dumps(assessment),
+             assessment.get("condition_score"),
+             json.dumps(assessment.get("visible_issues", [])),
+             assessment.get("confidence")))
+        conn.execute(
+            "INSERT INTO material_assessment (property_id, floor_type, floor_condition, "
+            "wood_species, paint_condition, source, confidence) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (property_id, assessment.get("floor_type"), assessment.get("floor_condition"),
+             assessment.get("wood_species"), assessment.get("paint_condition"),
+             "ai_photo", assessment.get("confidence")))
+
+
+def _maybe_update_estimated_value(property_id: int):
+    """Compute and persist properties.estimated_value once sqft and
+    year_built are both known, using the same deterministic formula as
+    the valuation module (Module 3 §9 / backend/valuation/calculator.py).
+    Called after any save_* that might have just completed the pair
+    (blueprint usually sets sqft, inspection usually sets year_built —
+    whichever one lands second is what actually triggers a real value).
+    Without this, estimated_value/price_per_sqft stay null forever and
+    the frontend shows "Value pending" even after enough data exists to
+    compute a real number.
+    """
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT sqft, year_built FROM properties WHERE id = ?", (property_id,)).fetchone()
+        if row and row["sqft"] and row["year_built"]:
+            # fetch_local_ppsf is a stub (see its docstring) — this is an
+            # illustrative estimate, not an appraisal, same caveat as the
+            # valuation module itself.
+            ppsf = fetch_local_ppsf(None)
+            estimated_value = calculate_base_value(row["sqft"], row["year_built"], ppsf)
+            conn.execute(
+                "UPDATE properties SET price_per_sqft = ?, estimated_value = ? WHERE id = ?",
+                (ppsf, estimated_value, property_id))
 
 
 def save_blueprint_fields(property_id: int, fields: dict):
@@ -58,19 +89,27 @@ def save_blueprint_fields(property_id: int, fields: dict):
     for it (COALESCE keeps the existing value otherwise) — a given
     blueprint sheet (e.g. Ground Floor) may not contain every field (e.g.
     bedroom count lives on the Upper Floor sheet instead).
+
+    NULLIF(?, 0) treats an extracted 0 the same as a missing value for
+    sqft/bedrooms/bathrooms — a sheet that doesn't mention bedrooms at
+    all is "unknown," not "a home with zero bedrooms." This is
+    defense-in-depth alongside the extraction prompt's own null-vs-zero
+    instruction (see blueprint_agent.py): that prompt has already been
+    caught giving inconsistent answers on this exact field once before
+    (BUGS.md #21), so the persistence layer doesn't rely on the prompt
+    alone to avoid a real room count getting clobbered by a false zero.
     """
     ensure_property_exists(property_id)
-    conn = _connect()
-    conn.execute(
-        "UPDATE properties SET "
-        "sqft = COALESCE(?, sqft), "
-        "bedrooms = COALESCE(?, bedrooms), "
-        "bathrooms = COALESCE(?, bathrooms) "
-        "WHERE id = ?",
-        (fields.get("sqft"), fields.get("bedrooms"), fields.get("bathrooms"),
-         property_id))
-    conn.commit()
-    conn.close()
+    with _db() as conn:
+        conn.execute(
+            "UPDATE properties SET "
+            "sqft = COALESCE(NULLIF(?, 0), sqft), "
+            "bedrooms = COALESCE(NULLIF(?, 0), bedrooms), "
+            "bathrooms = COALESCE(NULLIF(?, 0), bathrooms) "
+            "WHERE id = ?",
+            (fields.get("sqft"), fields.get("bedrooms"), fields.get("bathrooms"),
+             property_id))
+    _maybe_update_estimated_value(property_id)
 
 
 def save_inspection_form(property_id: int, fields: dict):
@@ -84,65 +123,60 @@ def save_inspection_form(property_id: int, fields: dict):
     redaction handling before being tokenized into this column).
     """
     ensure_property_exists(property_id)
-    conn = _connect()
-    conn.execute(
-        "INSERT INTO inspection_forms (property_id, parsed_fields) VALUES (?, ?)",
-        (property_id, json.dumps(fields)))
-    conn.execute(
-        "INSERT INTO material_assessment (property_id, floor_type, floor_condition, "
-        "wood_grade, paint_condition, source) VALUES (?, ?, ?, ?, ?, ?)",
-        (property_id, fields.get("floor_type"), fields.get("floor_condition"),
-         fields.get("wood_grade"), fields.get("paint_condition"), "inspection"))
-    conn.execute(
-        "UPDATE properties SET "
-        "builder = COALESCE(?, builder), "
-        "year_built = COALESCE(?, year_built), "
-        "address = COALESCE(?, address), "
-        "city_state_zip = COALESCE(?, city_state_zip) "
-        "WHERE id = ?",
-        (fields.get("builder"), fields.get("year_built"), fields.get("address"),
-         fields.get("city_state_zip"), property_id))
-    conn.commit()
-    conn.close()
+    with _db() as conn:
+        conn.execute(
+            "INSERT INTO inspection_forms (property_id, parsed_fields) VALUES (?, ?)",
+            (property_id, json.dumps(fields)))
+        conn.execute(
+            "INSERT INTO material_assessment (property_id, floor_type, floor_condition, "
+            "wood_grade, paint_condition, source) VALUES (?, ?, ?, ?, ?, ?)",
+            (property_id, fields.get("floor_type"), fields.get("floor_condition"),
+             fields.get("wood_grade"), fields.get("paint_condition"), "inspection"))
+        conn.execute(
+            "UPDATE properties SET "
+            "builder = COALESCE(?, builder), "
+            "year_built = COALESCE(?, year_built), "
+            "address = COALESCE(?, address), "
+            "city_state_zip = COALESCE(?, city_state_zip) "
+            "WHERE id = ?",
+            (fields.get("builder"), fields.get("year_built"), fields.get("address"),
+             fields.get("city_state_zip"), property_id))
+    _maybe_update_estimated_value(property_id)
 
 
 def get_property(property_id):
-    conn = _connect()
-    row = conn.execute(
-        "SELECT * FROM properties WHERE id = ?", (property_id,)).fetchone()
-    conn.close()
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT * FROM properties WHERE id = ?", (property_id,)).fetchone()
     return dict(row) if row else None
 
 
 def get_maintenance_needs(property_id, priority=None):
-    conn = _connect()
-    if priority:
-        rows = conn.execute(
-            "SELECT * FROM maintenance_needs WHERE property_id = ? AND priority = ?",
-            (property_id, priority)).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT * FROM maintenance_needs WHERE property_id = ?",
-            (property_id,)).fetchall()
-    conn.close()
+    with _db() as conn:
+        if priority:
+            rows = conn.execute(
+                "SELECT * FROM maintenance_needs WHERE property_id = ? AND priority = ?",
+                (property_id, priority)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM maintenance_needs WHERE property_id = ?",
+                (property_id,)).fetchall()
     return [dict(r) for r in rows]
 
 
 def get_contractors_by_category(category):
-    conn = _connect()
-    rows = conn.execute(
-        "SELECT * FROM renovation_companies WHERE category = ?",
-        (category,)).fetchall()
-    conn.close()
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM renovation_companies WHERE category = ?",
+            (category,)).fetchall()
     return [dict(r) for r in rows]
 
 
 def get_latest_inspection(property_id):
-    conn = _connect()
-    row = conn.execute(
-        "SELECT parsed_fields FROM inspection_forms WHERE property_id = ? "
-        "ORDER BY id DESC LIMIT 1", (property_id,)).fetchone()
-    conn.close()
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT parsed_fields FROM inspection_forms WHERE property_id = ? "
+            "ORDER BY id DESC LIMIT 1", (property_id,)).fetchone()
     return json.loads(row["parsed_fields"]) if row else None
 
 
@@ -150,10 +184,15 @@ def get_renovation_breakdown(property_id):
     """Normalize the renovation_cost_estimate field from the latest
     inspection form into a consistent list of
     {category, priority, cost, roi} for the frontend's RenovationTable.
-    GPT-4o's freeform JSON for this field has been observed in both a
-    list-of-line-items shape and a dict-keyed-by-category shape across
-    different runs (see tests/test_log.txt Tests 10 vs 17) — both are
-    normalized here rather than over-constraining the extraction prompt.
+
+    The extraction prompt (inspection_parser.py) now specifies one fixed
+    JSON schema (list of {category, priority, cost, roi} objects), which
+    the first branch below handles directly. The other branches are
+    fallbacks for the freeform shapes GPT-4o was observed returning
+    before that schema was locked down — a dict keyed by category, and a
+    list of single-key {category_name: cost_string} dicts (see
+    tests/test_log.txt Tests 10, 17, 22) — kept so older already-ingested
+    rows in the DB still render instead of going blank.
     """
     inspection = get_latest_inspection(property_id)
     if not inspection:
@@ -164,12 +203,25 @@ def get_renovation_breakdown(property_id):
     items = []
     if isinstance(raw, list):
         for r in raw:
-            items.append({
-                "category": r.get("item") or r.get("category"),
-                "priority": r.get("priority"),
-                "cost": r.get("est_cost") or r.get("cost"),
-                "roi": r.get("roi"),
-            })
+            if not isinstance(r, dict):
+                continue
+            if "category" in r or "item" in r:
+                # Current fixed schema, or the older item/est_cost shape.
+                items.append({
+                    "category": r.get("category") or r.get("item"),
+                    "priority": r.get("priority"),
+                    "cost": r.get("cost") or r.get("est_cost"),
+                    "roi": r.get("roi"),
+                })
+            else:
+                # Fallback: single-key {category_name: cost_string} dict.
+                for category, cost in r.items():
+                    items.append({
+                        "category": category,
+                        "priority": None,
+                        "cost": cost if isinstance(cost, str) else None,
+                        "roi": None,
+                    })
     elif isinstance(raw, dict):
         for category, r in raw.items():
             if not isinstance(r, dict):
@@ -181,6 +233,24 @@ def get_renovation_breakdown(property_id):
                 "roi": r.get("ROI (%)"),
             })
     return items
+
+
+def reset_property_data():
+    """Delete every ingested/derived row so uploads can start fresh:
+    properties and all their child tables, plus the PII token map (its
+    doc_ids reference documents that no longer exist after a reset).
+    renovation_companies is intentionally kept — it's seeded reference
+    data (schema.sql), not ingested content. Pinecone namespaces are also
+    left alone: the warranty document is ingested separately from the
+    upload flow, and wiping it would silently break /chat.
+    """
+    tables = ["property_images", "material_assessment", "maintenance_needs",
+              "inspection_forms", "documents", "pii_token_map", "properties"]
+    deleted = {}
+    with _db() as conn:
+        for table in tables:
+            deleted[table] = conn.execute(f"DELETE FROM {table}").rowcount
+    return deleted
 
 
 def fetch_local_ppsf(zip_code):

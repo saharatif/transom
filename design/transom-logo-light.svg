@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 340 200" role="img" aria-labelledby="transomLogoLightTitle">
+  <title id="transomLogoLightTitle">Transom</title>
+  <!-- Icon: three ascending columns under a rising diagonal beam,
+       recreated as clean vector shapes from design/Gemini_..._logo.png.
+       Colors match this app's light-theme tokens (theme.css). -->
+  <g>
+    <rect x="24"  y="80"  width="28" height="48" fill="#02546C" />
+    <rect x="70"  y="56"  width="28" height="72" fill="#02546C" />
+    <rect x="116" y="30"  width="28" height="98" fill="#02546C" />
+    <polygon points="14,86 208,4 208,26 34,108" fill="#02546C" />
+  </g>
+  <!-- Wordmark -->
+  <text x="170" y="180"
+        font-family="Arial, Helvetica, sans-serif"
+        font-size="44"
+        font-weight="700"
+        letter-spacing="4"
+        fill="#212529"
+        text-anchor="middle">TRANSOM</text>
+</svg>
