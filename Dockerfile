@@ -27,11 +27,13 @@ RUN python -c "from langchain_community.cross_encoders import HuggingFaceCrossEn
 COPY backend/ backend/
 COPY --from=frontend /app/frontend/dist frontend/dist
 
-# SQLite DB + uploaded photos live on a mounted volume so they survive
-# restarts/redeploys. The app creates the schema on first boot.
+# SQLite DB + uploaded photos live under /data — the app creates the
+# directory and schema on first boot, so no VOLUME instruction is needed
+# (Railway rejects it; mount a volume at /data via the platform's own
+# settings — Railway Volumes / compose volumes — if you want the data to
+# survive redeploys).
 ENV DATABASE_PATH=/data/property_intel.db \
     UPLOADS_DIR=/data/uploads
-VOLUME /data
 
 EXPOSE 8000
 # ${PORT} so platforms that inject their own port (Railway, Render,
