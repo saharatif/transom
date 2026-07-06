@@ -10,9 +10,15 @@ openai>=2.44.0
 mistralai==1.5.2
 
 # RAG
-langchain==0.3.7
-langchain-openai==0.2.8
-langchain-community==0.3.5
+# The langchain family moved to ranges (late 0.3 line) instead of the
+# original exact pins: langchain-openai 0.2.x caps openai<2.0.0, which
+# conflicts with the openai>=2.44.0 pin above (needed by logfire, see
+# BUGS.md #7), and langchain 0.3.7 in turn caps a langchain-core too old
+# for langchain-openai 0.3.35. The dev venv happened to hold a mix pip's
+# strict resolver refuses to recreate — these ranges resolve cleanly.
+langchain>=0.3.27,<0.4
+langchain-openai>=0.3.35,<0.4
+langchain-community>=0.3.27,<0.4
 langchain-pinecone==0.2.0
 langgraph==0.2.45
 pinecone-client==5.0.1
