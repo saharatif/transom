@@ -1617,3 +1617,145 @@ Test output:
 4. F5 -> empty dashboard again.
 5. sqlite3 check afterwards: DB untouched (1 property, value 316944).
 -> PASSED.
+
+=====================================================================
+TEST 36: PropertyCard shows only uploaded photos (static reference
+imagery removed)
+---------------------------------------------------------------------
+Test name: uploaded_photos_only_test
+
+Changes under test:
+- PropertyCard's hardcoded hero + 3 thumbnails (design-reference stock
+  photos in public/images/) removed. The card now renders the property's
+  actual uploaded photos: first upload = hero, rest = thumbnails, and a
+  "No photos uploaded yet" placeholder when the property has none.
+- Backend: photo pipeline now moves the blurred _safe copy into a
+  persistent UPLOADS_DIR (./uploads, gitignored) instead of leaving it
+  in the OS temp dir; /property/{id} now returns an images[] list
+  (filtered to files that still exist, so rows pointing at reaped temp
+  files degrade to the placeholder instead of broken <img> tags); new
+  GET /images/{id} serves the file (404 for unknown/missing).
+
+Bash command:
+uv run pytest tests/unit -q   # 68 passed (2 new: served-image round
+                              # trip; missing-file hidden + 404)
+node photo_card_check.mjs     # Playwright with a real upload
+
+Test output:
+- Fresh session: zero <img> elements in the card (no static photos).
+- Real photo upload -> success toast -> hero <img> src =
+  http://127.0.0.1:8000/images/1, decoded (naturalWidth > 0) — i.e. the
+  actual uploaded (blurred) photo served from the API, not an asset.
+-> PASSED.
+
+=====================================================================
+TEST 37: Per-document-type session gating (photos-only session must not
+reveal stored renovation/blueprint data)
+---------------------------------------------------------------------
+Test name: per_doctype_session_gate_test
+
+Change under test (user report): with the Test 35 session gate, ANY
+upload revealed the property's full stored view — uploading only photos
+surfaced renovation priorities (old inspection data) and bed/bath/value
+(old blueprint/inspection data) from previous sessions. Gating is now
+per doc type via a sessionDocTypes set in App.vue: photos unlock only
+the photo carousel; renovation priorities require an inspection upload
+this session; structured details (badges/price/builder/status) require
+a blueprint or inspection upload this session, with an explanatory hint
+shown instead. An explicit property-ID search remains the "show me
+everything stored" escape hatch, and a reset clears the gate state.
+
+Bash command:
+node doc_gate_check.mjs   # Playwright, real photo upload
+
+Test output:
+- Photo-only session: hero photo shown; 0 price / 0 badge elements;
+  card hint "Upload a blueprint or inspection form to see size, rooms,
+  valuation and renovation priorities."; renovation table shows its
+  empty state (0 rows).
+- Explicit search for "1": full view unlocks — $316,944, 3 badges,
+  8 renovation rows.
+-> PASSED.
+
+=====================================================================
+TEST 38: Photo tiles scoped to the current session's uploads
+---------------------------------------------------------------------
+Test name: session_scoped_photo_tiles_test
+
+Change under test (user report): photos accumulate per property in
+property_images across sessions, so uploading 3 photos showed 8+ tiles
+(this session's 3 plus every earlier upload). POST /ingest/photo now
+returns the property_images row id it created (save_photo_assessment
+returns lastrowid, threaded through _run_ingestion); App.vue collects
+these ids in a sessionImageIds set and passes PropertyCard a filtered
+images list — only this session's uploads render, in upload order.
+Explicit property-ID search still shows the full stored photo set
+(consistent with the rest of the per-doc-type gating); reset clears
+the id set.
+
+Bash command:
+uv run pytest tests/unit -q   # 68 passed (image_id assertion added)
+node session_photos_check.mjs # Playwright, real upload
+
+Test output:
+- Fresh session, ONE photo uploaded -> exactly 1 tile (hero, 0
+  thumbnails), despite 10 stored photos in the DB.
+- Explicit search "1" -> full stored set appears (hero + 9 thumbnails).
+-> PASSED.
+
+=====================================================================
+TEST 39: Blueprint/inspection gating split + upload doc-type race fix
+---------------------------------------------------------------------
+Test name: split_gating_and_doctype_race_test
+
+Changes under test (user report: photos + one blueprint uploaded, yet
+renovation priorities and the $316,944 valuation appeared):
+1. showDetails split into showSpecs (beds/baths/sqft, unlocked by a
+   blueprint OR inspection upload this session) and showValuation
+   (price, address, builder/year — all inspection-derived — unlocked
+   only by an inspection upload). Renovations already required an
+   inspection. Explicit property-ID search still unlocks everything.
+2. Real race bug fixed in FileUpload.vue: the emitted docType was read
+   from the reactive chip AFTER the multi-second upload await — if the
+   user switched Photo/Blueprint/Inspection chips while an upload was
+   processing, the completion was attributed to the wrong doc type
+   (mislabeled history rows AND wrongly unlocked gated panels). The doc
+   type is now captured once when the upload batch starts.
+
+Bash command:
+node blueprint_gate_check.mjs   # Playwright, real blueprint upload
+
+Test output (fresh session, ONE blueprint uploaded):
+- Spec badges: 3 (4 Bed / 3 Bath / 2,201 sqft) — blueprint data shown.
+- Price elements: 0; builder/meta rows: 0 (inspection-derived, hidden).
+- Renovation rows: 0, with "upload a filled inspection form" empty state.
+- Card hint: "Upload a filled inspection form to see valuation, builder
+  details and renovation priorities."
+- Photo strip shows the "No photos uploaded yet" placeholder (no photos
+  this session).
+-> PASSED.
+
+=====================================================================
+TEST 40: Column titles aligned on one baseline
+---------------------------------------------------------------------
+Test name: column_title_alignment_test
+
+Change under test (user request): the three column headers used three
+different treatments at three vertical positions — a floating uppercase
+label (upload), an in-card ribbon (property), and a two-line caption +
+h2 (chat). Added a shared .column-title class in theme.css (text-xs,
+700, 0.06em tracking, uppercase, muted) applied to all three; the chat
+header restructured to a single header bar mirroring the property
+ribbon's padding/background (property # moved to the bar's right side);
+the upload heading given an 11px top offset to match the in-card bars'
+border + padding.
+
+Bash command:
+node align_check.mjs   # Playwright boundingBox measurement
+
+Test output:
+"ASSET INGESTION QUEUE" -> y=101.0 h=17.0
+"PROPERTY"              -> y=101.0 h=17.0
+"WARRANTY ASSISTANT"    -> y=101.0 h=17.0
+All three identical position, height, and style. Screenshot confirms.
+-> PASSED.

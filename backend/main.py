@@ -6,6 +6,7 @@ load_dotenv()
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from .observability.logfire_config import init_logfire
 from .ingestion.image_agent import analyze_property_image
 from .ingestion.preprocess import safe_output_path
@@ -13,9 +14,11 @@ from .ingestion.blueprint_agent import process_blueprint
 from .ingestion.inspection_parser import parse_inspection_form
 from .db.queries import (save_photo_assessment, save_blueprint_fields,
                          save_inspection_form, get_property, get_renovation_breakdown,
-                         get_contractors_by_category, reset_property_data)
+                         get_contractors_by_category, reset_property_data,
+                         get_property_images, get_image_record)
+from .db.setup_db import setup_db
 from .rag.graph import rag_agent
-import os, shutil, tempfile, uuid, logfire
+import os, shutil, sqlite3, tempfile, uuid, logfire
 
 init_logfire()
 app = FastAPI(title="Property Intelligence API")
@@ -29,6 +32,29 @@ app.add_middleware(
     allow_methods=["*"], allow_headers=["*"])
 
 DB_PATH = os.environ.get("DATABASE_PATH", "./property_intel.db")
+
+# Where uploaded property photos (their blurred _safe copies) are kept so
+# the dashboard can display them. The temp spool directory won't do — the
+# OS reaps it, and nothing serves it over HTTP.
+UPLOADS_DIR = os.environ.get("UPLOADS_DIR", "./uploads")
+os.makedirs(UPLOADS_DIR, exist_ok=True)
+
+
+def _ensure_db():
+    """Create the schema on first boot (fresh deployments have no DB
+    file) — setup_db.py's manual run stays the local-dev path."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='properties'"
+        ).fetchone()
+    finally:
+        conn.close()
+    if not exists:
+        setup_db()
+
+
+_ensure_db()
 
 # What each ingestion pipeline can actually process: photos go to OpenCV +
 # GPT-4o Vision (images only), blueprints to Mistral OCR (PDF or image),
@@ -93,8 +119,9 @@ def _run_ingestion(doc_type: str, property_id: int, file: UploadFile,
             os.remove(path)
         except OSError:
             pass
-    save(property_id, result, path)
-    return result
+    # A save callback may return an identifier for what it persisted
+    # (the photo one returns its property_images row id); pass it through.
+    return result, save(property_id, result, path)
 
 
 @app.get("/health")
@@ -108,19 +135,30 @@ async def health():
 # its threadpool, so other requests (health checks, property fetches)
 # stay responsive during an ingestion.
 
+def _persist_photo(property_id: int, assessment: dict, spooled_path: str):
+    """Move the blurred _safe copy (written by the preprocessing step next
+    to the spooled upload, which _run_ingestion deletes) into UPLOADS_DIR
+    so it survives temp cleanup and can be served back to the dashboard,
+    then record that final path.
+    """
+    safe_path = safe_output_path(spooled_path)
+    final_path = os.path.join(UPLOADS_DIR, os.path.basename(safe_path))
+    shutil.move(safe_path, final_path)
+    return save_photo_assessment(property_id, final_path, assessment)
+
+
 @app.post("/ingest/photo")
 def ingest_photo(property_id: int = Form(..., gt=0), file: UploadFile = File(...)):
-    result = _run_ingestion(
-        "photo", property_id, file, analyze_property_image,
-        # Persist the blurred _safe copy's path — the spooled original is
-        # deleted by _run_ingestion, so it must not be what's stored.
-        lambda pid, res, path: save_photo_assessment(pid, safe_output_path(path), res))
-    return {"status": "ok", "assessment": result}
+    result, image_id = _run_ingestion("photo", property_id, file,
+                                      analyze_property_image, _persist_photo)
+    # image_id lets the frontend scope its photo tiles to the uploads
+    # made in the current session.
+    return {"status": "ok", "assessment": result, "image_id": image_id}
 
 
 @app.post("/ingest/blueprint")
 def ingest_blueprint(property_id: int = Form(..., gt=0), file: UploadFile = File(...)):
-    result = _run_ingestion(
+    result, _ = _run_ingestion(
         "blueprint", property_id, file, process_blueprint,
         lambda pid, res, _path: save_blueprint_fields(pid, res))
     return {"status": "ok", "fields": result}
@@ -128,7 +166,7 @@ def ingest_blueprint(property_id: int = Form(..., gt=0), file: UploadFile = File
 
 @app.post("/ingest/inspection")
 def ingest_inspection(property_id: int = Form(..., gt=0), file: UploadFile = File(...)):
-    result = _run_ingestion(
+    result, _ = _run_ingestion(
         "inspection", property_id, file, parse_inspection_form,
         lambda pid, res, _path: save_inspection_form(pid, res))
     return {"status": "ok", "fields": result}
@@ -145,7 +183,22 @@ def get_property_detail(property_id: int):
         raise HTTPException(status_code=404,
                             detail=f"Property {property_id} not found")
     renovations = get_renovation_breakdown(property_id)
-    return {"property": prop, "renovations": renovations}
+    # Only photos whose file still exists on disk — rows from before the
+    # uploads/ directory existed point at reaped temp files.
+    images = [{"id": img["id"], "url": f"/images/{img['id']}"}
+              for img in get_property_images(property_id)
+              if os.path.exists(img["image_path"])]
+    return {"property": prop, "renovations": renovations, "images": images}
+
+
+@app.get("/images/{image_id}")
+def serve_image(image_id: int):
+    """Serve an uploaded property photo (its blurred _safe copy) by its
+    property_images row id."""
+    record = get_image_record(image_id)
+    if record is None or not os.path.exists(record["image_path"]):
+        raise HTTPException(status_code=404, detail=f"Image {image_id} not found")
+    return FileResponse(record["image_path"])
 
 
 @app.get("/contractors")
@@ -184,3 +237,15 @@ def chat(property_id: int = Form(..., gt=0), message: str = Form(...)):
         raise HTTPException(status_code=502,
                             detail=f"Warranty agent failed: {type(e).__name__}: {e}")
     return {"answer": result["answer"], "citations": result["citations"]}
+
+
+# Serve the built frontend (frontend/dist, created by `npm run build`)
+# from this same server — one origin, so deployments need no CORS setup
+# and no hardcoded API address in the frontend. Mounted last so every
+# API route above takes precedence. In dev this directory usually
+# doesn't exist and the Vite dev server (:5173) is used instead.
+_FRONTEND_DIST = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "frontend", "dist"))
+if os.path.isdir(_FRONTEND_DIST):
+    from fastapi.staticfiles import StaticFiles
+    app.mount("/", StaticFiles(directory=_FRONTEND_DIST, html=True), name="frontend")

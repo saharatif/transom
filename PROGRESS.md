@@ -86,6 +86,12 @@ Full-codebase review with four goals: better coding strategies, improved logic, 
 **Follow-up (user request):**
 - [x] Reset-database button in Settings — `POST /reset` wipes all ingested data (properties + child tables + PII token map) while keeping the seeded contractor directory and the Pinecone warranty index; frontend gates it behind a two-step confirm, clears the session's upload history/chat transcript, and shows the fresh empty state. Unit-tested + verified live (see `tests/test_log.txt` Test 32)
 
+**Deployment packaging (user request: shareable demo link for an interviewer):**
+- [x] Single-origin serving — FastAPI serves the production frontend build (`frontend/dist`) itself; `client.js` uses relative API paths in production (dev keeps 127.0.0.1:8000 + Vite). No CORS or hardcoded addresses in deployment
+- [x] `LOGFIRE_TOKEN` made optional (was a hard `KeyError` crash on hosts without Logfire); schema auto-created on first boot
+- [x] `Dockerfile` (multi-stage: node build → python image with spaCy model + reranker baked in), `docker-compose.yml` (env_file + `/data` volume), `.dockerignore`
+- [x] `DEPLOY.md` — Railway (recommended), Fly.io, generic Docker host + Cloudflare tunnel; env var table, RAM sizing (2–4 GB), demo-link cost/safety notes
+
 ## Milestone 8 — Polish + demo
 
 - [ ] Demo video

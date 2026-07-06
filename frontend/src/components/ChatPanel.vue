@@ -75,8 +75,8 @@ function retry(msg) {
 <template>
   <div class="chat-panel">
     <div class="chat-header">
+      <h2 class="column-title">Warranty Assistant</h2>
       <span class="caption">Property #{{ propertyId }}</span>
-      <h2>Warranty Assistant</h2>
     </div>
 
     <div class="message-stream" ref="scrollRegion" aria-live="polite">
@@ -144,8 +144,14 @@ function retry(msg) {
   overflow: hidden;
 }
 
+/* Mirrors PropertyCard's .card-ribbon (same padding/background) so the
+   three column titles align on one baseline. */
 .chat-header {
-  padding: 12px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background-color: var(--color-bg-inset);
   border-bottom: 1px solid var(--color-border);
 }
 

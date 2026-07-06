@@ -1,7 +1,9 @@
-// Use 127.0.0.1, not localhost — on this system "localhost" resolves to
-// ::1 (IPv6) first, but uvicorn only binds IPv4, so browsers/Node's fetch
-// attempt the IPv6 route and get ERR_CONNECTION_RESET. See BUGS.md #18.
-const API = 'http://127.0.0.1:8000'
+// Dev (Vite on :5173): talk to uvicorn on 127.0.0.1:8000 — not
+// "localhost", which resolves to ::1 (IPv6) first on this system while
+// uvicorn only binds IPv4 (ERR_CONNECTION_RESET, see BUGS.md #18).
+// Production build: served BY the FastAPI server itself (see main.py's
+// static mount), so API calls are same-origin relative paths.
+const API = import.meta.env.DEV ? 'http://127.0.0.1:8000' : ''
 
 export class ApiError extends Error {
   constructor(message, status) {
@@ -61,6 +63,11 @@ export function getProperty(propertyId) {
 
 export function getContractors(category) {
   return request(`/contractors?category=${encodeURIComponent(category)}`)
+}
+
+// For resources the API serves by relative URL (e.g. uploaded photos).
+export function apiUrl(path) {
+  return `${API}${path}`
 }
 
 export function resetDatabase() {

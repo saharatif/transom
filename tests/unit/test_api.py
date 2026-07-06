@@ -11,10 +11,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 import backend.main as main
+from backend.ingestion.preprocess import safe_output_path
 
 
 @pytest.fixture
-def client(temp_db):
+def client(temp_db, tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "UPLOADS_DIR", str(tmp_path / "uploads"))
+    import os
+    os.makedirs(main.UPLOADS_DIR, exist_ok=True)
     return TestClient(main.app, raise_server_exceptions=False)
 
 
@@ -26,20 +30,53 @@ def _rows(db_path, table):
     return rows
 
 
-def test_photo_ingest_persists_safe_image_path(client, temp_db, monkeypatch):
+def _fake_photo_agent(assessment):
+    """Mimic the real photo pipeline's side effect: preprocessing writes a
+    blurred _safe copy next to the spooled upload, which the endpoint then
+    moves into UPLOADS_DIR."""
+    def agent(path, pid, doc_id, db):
+        with open(safe_output_path(path), "wb") as f:
+            f.write(b"fake-blurred-image")
+        return assessment
+    return agent
+
+
+def test_photo_ingest_persists_served_image(client, temp_db, monkeypatch):
     monkeypatch.setattr(
         main, "analyze_property_image",
-        lambda path, pid, doc_id, db: {"condition_score": 7, "confidence": "high",
-                                       "visible_issues": ["worn paint"]})
+        _fake_photo_agent({"condition_score": 7, "confidence": "high",
+                           "visible_issues": ["worn paint"]}))
     res = client.post("/ingest/photo", data={"property_id": 1},
                       files={"file": ("kitchen.jpg", b"fake-image-bytes", "image/jpeg")})
     assert res.status_code == 200
     images = _rows(temp_db, "property_images")
     assert len(images) == 1
     assert images[0]["condition_score"] == 7
-    # The stored path must be the kept _safe sibling, not the deleted
-    # spooled original.
+    # The response reports which row this upload created — the frontend
+    # uses it to scope photo tiles to the current session.
+    assert res.json()["image_id"] == images[0]["id"]
+    # The stored path must be the kept _safe copy, moved into UPLOADS_DIR
+    # (the spooled original is deleted after processing).
+    assert images[0]["image_path"].startswith(main.UPLOADS_DIR)
     assert images[0]["image_path"].endswith("_safe.jpg")
+
+    # The property view lists it, and the image endpoint serves the bytes.
+    detail = client.get("/property/1").json()
+    assert detail["images"] == [{"id": images[0]["id"], "url": f"/images/{images[0]['id']}"}]
+    served = client.get(detail["images"][0]["url"])
+    assert served.status_code == 200
+    assert served.content == b"fake-blurred-image"
+
+
+def test_missing_image_file_404s_and_is_hidden_from_property_view(client, temp_db):
+    conn = sqlite3.connect(temp_db)
+    conn.execute("INSERT INTO properties (id) VALUES (1)")
+    conn.execute("INSERT INTO property_images (property_id, image_path) "
+                 "VALUES (1, '/tmp/reaped-temp-file_safe.jpg')")
+    conn.commit()
+    conn.close()
+    assert client.get("/property/1").json()["images"] == []
+    assert client.get("/images/1").status_code == 404
 
 
 def test_blueprint_ingest_persists_fields(client, temp_db, monkeypatch):

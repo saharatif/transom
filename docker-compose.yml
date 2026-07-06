@@ -1,0 +1,15 @@
+services:
+  transom:
+    build: .
+    ports:
+      - "8000:8000"
+    # API keys come from the local .env (never baked into the image):
+    # OPENAI_API_KEY, MISTRAL_API_KEY, PINECONE_API_KEY,
+    # LOGFIRE_TOKEN (optional — runs with observability off if absent).
+    env_file: .env
+    volumes:
+      - transom-data:/data
+    restart: unless-stopped
+
+volumes:
+  transom-data:

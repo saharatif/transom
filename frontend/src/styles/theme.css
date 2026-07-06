@@ -95,6 +95,19 @@ h2 {
   color: var(--color-text-muted);
 }
 
+/* Shared treatment for the title at the top of each dashboard column
+   (upload queue / property ribbon / chat header) so the three align on
+   one baseline with identical size, weight and tracking. */
+.column-title {
+  font-size: var(--text-xs);
+  line-height: 1.55;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  margin: 0;
+}
+
 /* Production accessibility standard: visible focus ring on keyboard nav */
 :focus-visible {
   outline: 2px solid var(--color-primary);

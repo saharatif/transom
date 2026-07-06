@@ -1,5 +1,5 @@
 <script setup>
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import Sidebar from './components/Sidebar.vue'
 import BrandLogo from './components/BrandLogo.vue'
 import ThemeToggle from './components/ThemeToggle.vue'
@@ -40,7 +40,38 @@ const isRefreshing = ref(false)
 // session (a successful upload, or explicitly jumping to a property ID).
 // Nothing is deleted on refresh; the DB (and MCP tools) keep everything.
 // The trash button is the way to actually clear stored data.
+//
+// Gating is per document type: uploading only photos must not reveal
+// stored renovation priorities (inspection-form data) or bed/bath/value
+// details (blueprint/inspection data) left over from earlier sessions —
+// each panel unlocks with the doc type that feeds it. An explicit
+// property-ID search is the exception: looking a property up means
+// "show me everything stored for it."
 const sessionActive = ref(false)
+const sessionDocTypes = ref(new Set())
+// property_images row ids created by THIS session's photo uploads —
+// photos accumulate per property in the DB across sessions, so the photo
+// tiles filter to these (see visibleImages) unless the property was
+// explicitly looked up.
+const sessionImageIds = ref(new Set())
+const explicitLookup = ref(false)
+
+// Blueprint data (size/rooms) and inspection data (builder/year/address,
+// and the valuation computed from year_built) unlock separately — a
+// blueprint-only session must not surface the price or builder stored
+// by an earlier session's inspection form.
+const showSpecs = computed(() =>
+  explicitLookup.value || sessionDocTypes.value.has('blueprint') || sessionDocTypes.value.has('inspection'))
+const showValuation = computed(() =>
+  explicitLookup.value || sessionDocTypes.value.has('inspection'))
+const visibleRenovations = computed(() =>
+  explicitLookup.value || sessionDocTypes.value.has('inspection')
+    ? propertyData.value?.renovations || []
+    : [])
+const visibleImages = computed(() => {
+  const all = propertyData.value?.images || []
+  return explicitLookup.value ? all : all.filter((img) => sessionImageIds.value.has(img.id))
+})
 
 const searchInput = ref('')
 
@@ -49,8 +80,10 @@ function onSearchSubmit() {
   if (!Number.isNaN(id) && id > 0) {
     propertyId.value = id
     searchInput.value = ''
-    // Explicitly asking for a property counts as session activity.
+    // Explicitly asking for a property counts as session activity and
+    // unlocks the full stored view of it.
     sessionActive.value = true
+    explicitLookup.value = true
     refreshProperty()
   } else if (searchInput.value.trim()) {
     toasts.info('Property IDs are positive numbers — try "1".')
@@ -87,10 +120,15 @@ function onManualRefresh() {
   refreshProperty()
 }
 
-function onIngested() {
+function onIngested({ docType, result }) {
   // Any successful upload can change property fields (sqft, condition,
-  // renovation estimate, etc.) — refetch the combined view.
+  // renovation estimate, etc.) — refetch the combined view, and unlock
+  // the panel(s) this document type feeds.
   sessionActive.value = true
+  sessionDocTypes.value = new Set([...sessionDocTypes.value, docType])
+  if (docType === 'photo' && result?.image_id != null) {
+    sessionImageIds.value = new Set([...sessionImageIds.value, result.image_id])
+  }
   refreshProperty()
 }
 
@@ -119,6 +157,9 @@ async function onResetClick() {
     propertyData.value = null
     loadState.value = 'idle'
     sessionActive.value = false
+    sessionDocTypes.value = new Set()
+    sessionImageIds.value = new Set()
+    explicitLookup.value = false
     toasts.success('Database reset — upload fresh documents to start over.')
   } catch (err) {
     toasts.error(`Reset failed: ${err.message}`)
@@ -187,11 +228,14 @@ async function onResetClick() {
         <section class="column" aria-label="Property details">
           <PropertyCard
             :data="propertyData"
+            :images="visibleImages"
             :loading="loadState === 'loading'"
             :not-found="loadState === 'notfound'"
+            :show-specs="showSpecs"
+            :show-valuation="showValuation"
             @refresh="refreshProperty"
           />
-          <RenovationTable :renovations="propertyData?.renovations || []" />
+          <RenovationTable :renovations="visibleRenovations" />
         </section>
 
         <section class="column chat-column" aria-label="Chat">

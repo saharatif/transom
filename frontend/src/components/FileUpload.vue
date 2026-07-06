@@ -31,13 +31,13 @@ const docTypeLabels = {
 const multiFileTypes = new Set(['photo', 'blueprint'])
 const allowsMultiple = computed(() => multiFileTypes.has(docType.value))
 
-async function uploadOne(file) {
-  const entry = startItem(file.name, docTypeLabels[docType.value])
+async function uploadOne(file, type) {
+  const entry = startItem(file.name, docTypeLabels[type])
   try {
-    const result = await uploadFile(docType.value, props.propertyId, file)
+    const result = await uploadFile(type, props.propertyId, file)
     entry.status = 'complete'
     toasts.success(`${file.name} processed — property data updated.`)
-    emit('ingested', { docType: docType.value, result })
+    emit('ingested', { docType: type, result })
   } catch (err) {
     entry.status = 'failed'
     entry.error = err.message
@@ -49,13 +49,18 @@ async function handleFiles(fileList) {
   const files = allowsMultiple.value ? Array.from(fileList) : Array.from(fileList).slice(0, 1)
   if (!files.length) return
 
+  // Capture the selected doc type NOW — an upload takes many seconds,
+  // and reading docType.value again after the await would mis-attribute
+  // the completed upload if the user switches chips mid-flight (which
+  // also mis-unlocked session-gated panels in App.vue).
+  const type = docType.value
   isUploading.value = true
   try {
     // Sequential, not parallel — each ingest call already triggers a
     // full OCR/Vision + redaction pipeline; running several at once
     // would just contend for the same rate limits.
     for (const file of files) {
-      await uploadOne(file)
+      await uploadOne(file, type)
     }
   } finally {
     isUploading.value = false
@@ -78,7 +83,7 @@ const STATUS_LABELS = { processing: 'Processing…', complete: 'Complete', faile
 <template>
   <div class="upload-panel">
     <div class="panel-heading">
-      <h2>Asset Ingestion Queue</h2>
+      <h2 class="column-title">Asset Ingestion Queue</h2>
     </div>
 
     <div class="doc-type-select" role="radiogroup" aria-label="Document type">
@@ -194,11 +199,11 @@ const STATUS_LABELS = { processing: 'Processing…', complete: 'Complete', faile
   gap: 16px;
 }
 
-.panel-heading h2 {
-  text-transform: uppercase;
-  font-size: var(--text-sm);
-  letter-spacing: 0.05em;
-  color: var(--color-text-muted);
+/* Matches the vertical text offset inside the other columns' header
+   bars (1px card border + 10px padding), so all three column titles sit
+   on one line. */
+.panel-heading {
+  padding-top: 11px;
 }
 
 .doc-type-select {

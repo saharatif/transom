@@ -43,19 +43,24 @@ def save_photo_assessment(property_id: int, image_path: str, assessment: dict):
     """
     ensure_property_exists(property_id)
     with _db() as conn:
-        conn.execute(
+        cursor = conn.execute(
             "INSERT INTO property_images (property_id, image_path, ai_assessment, "
             "condition_score, issues_detected, confidence) VALUES (?, ?, ?, ?, ?, ?)",
             (property_id, image_path, json.dumps(assessment),
              assessment.get("condition_score"),
              json.dumps(assessment.get("visible_issues", [])),
              assessment.get("confidence")))
+        image_id = cursor.lastrowid
         conn.execute(
             "INSERT INTO material_assessment (property_id, floor_type, floor_condition, "
             "wood_species, paint_condition, source, confidence) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (property_id, assessment.get("floor_type"), assessment.get("floor_condition"),
              assessment.get("wood_species"), assessment.get("paint_condition"),
              "ai_photo", assessment.get("confidence")))
+    # Returned so the API response can tell the frontend which
+    # property_images row this upload created (used to scope the
+    # dashboard's photo tiles to the current session).
+    return image_id
 
 
 def _maybe_update_estimated_value(property_id: int):
@@ -233,6 +238,26 @@ def get_renovation_breakdown(property_id):
                 "roi": r.get("ROI (%)"),
             })
     return items
+
+
+def get_property_images(property_id):
+    """All uploaded-photo records for a property, oldest first — the
+    frontend's PropertyCard uses the first as its hero image and the
+    rest as thumbnails.
+    """
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT id, image_path FROM property_images WHERE property_id = ? "
+            "ORDER BY id", (property_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_image_record(image_id):
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT id, image_path FROM property_images WHERE id = ?",
+            (image_id,)).fetchone()
+    return dict(row) if row else None
 
 
 def reset_property_data():

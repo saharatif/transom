@@ -1,27 +1,35 @@
 <script setup>
 import { computed, ref } from 'vue'
 import AppIcon from './AppIcon.vue'
+import { apiUrl } from '../api/client'
 import { useToasts } from '../composables/useToasts'
 
 const props = defineProps({
   data: { type: Object, default: null },
+  // Session-scoped photo list, filtered by App.vue — NOT data.images
+  // directly (that's every photo ever stored for the property).
+  images: { type: Array, default: () => [] },
   loading: { type: Boolean, default: false },
   notFound: { type: Boolean, default: false },
+  // Session gating (set by App.vue): specs (beds/baths/sqft) come from
+  // blueprint uploads; valuation/builder/year/address come from
+  // inspection uploads. Each stays hidden until its doc type has been
+  // uploaded this session, so a photos-only session doesn't reveal data
+  // stored by earlier sessions.
+  showSpecs: { type: Boolean, default: true },
+  showValuation: { type: Boolean, default: true },
 })
 defineEmits(['refresh'])
 
 const toasts = useToasts()
 
-// Reference photography per design/DESIGN.md's Property Detail Card spec
-// (hero + 3 room thumbnails), copied into public/images/.
-const heroImage = '/images/b4a24c6bba5ce5e09dea9d4c72d7c2bd-uncropped_scaled_within_1536_1152.webp'
-const thumbnails = [
-  '/images/4390af3f3447732e89b2906be3840777-uncropped_scaled_within_1536_1152.webp',
-  '/images/708cdc9e152a595316da42728bda6bcf-uncropped_scaled_within_1536_1152.webp',
-  '/images/880c2a3c89a11a8ed4090b8b88bc1ecc-uncropped_scaled_within_1536_1152.webp',
-]
-
 const property = computed(() => props.data?.property)
+
+// Only photos actually uploaded (served back by the API as their blurred
+// _safe copies) — no static placeholder imagery. First photo is the
+// hero; the rest become thumbnails.
+const heroUrl = computed(() => (props.images.length ? apiUrl(props.images[0].url) : null))
+const thumbnails = computed(() => props.images.slice(1))
 
 const title = computed(() => {
   const p = property.value
@@ -56,30 +64,34 @@ async function copyPropertyId() {
 }
 
 function openHeroPhoto() {
-  window.open(heroImage, '_blank', 'noopener')
+  if (heroUrl.value) window.open(heroUrl.value, '_blank', 'noopener')
 }
 </script>
 
 <template>
   <div class="property-card">
     <div class="card-ribbon">
-      <span class="ribbon-title">{{ property ? `PROPERTY #${property.id}` : 'PROPERTY' }}</span>
+      <span class="column-title">{{ property ? `Property #${property.id}` : 'Property' }}</span>
       <span class="ribbon-location" v-if="property?.city_state_zip">
         <AppIcon name="pin" :size="11" /> {{ property.city_state_zip }}
       </span>
     </div>
 
-    <div class="carousel">
-      <img :src="heroImage" alt="Primary exterior photo of the property" class="hero-img" />
-      <div class="thumb-strip">
+    <div class="carousel" v-if="heroUrl">
+      <img :src="heroUrl" alt="Primary uploaded photo of the property" class="hero-img" />
+      <div class="thumb-strip" v-if="thumbnails.length">
         <img
           v-for="(thumb, i) in thumbnails"
-          :key="i"
-          :src="thumb"
+          :key="thumb.id"
+          :src="apiUrl(thumb.url)"
           class="thumb-img"
-          :alt="`Interior room photo ${i + 1}`"
+          :alt="`Uploaded property photo ${i + 2}`"
         />
       </div>
+    </div>
+    <div class="carousel-placeholder" v-else-if="property && !loading">
+      <AppIcon name="camera" :size="20" />
+      <span class="caption">No photos uploaded yet</span>
     </div>
 
     <!-- Skeleton while the first fetch is in flight, so the card doesn't
@@ -96,26 +108,37 @@ function openHeroPhoto() {
 
     <div class="card-body" v-else-if="property">
       <div class="title-row">
-        <h2>{{ title }}</h2>
-        <span class="price" :class="{ pending: priceLabel === 'Value pending' }">{{ priceLabel }}</span>
+        <h2>{{ showValuation ? title : `Property #${property.id}` }}</h2>
+        <span
+          v-if="showValuation"
+          class="price"
+          :class="{ pending: priceLabel === 'Value pending' }"
+        >{{ priceLabel }}</span>
       </div>
 
-      <div class="address-row caption">
+      <div class="address-row caption" v-if="showValuation">
         <AppIcon name="pin" :size="12" /> {{ addressLine }}
       </div>
 
-      <div class="badges">
+      <div class="badges" v-if="showSpecs">
         <span class="badge">{{ property.bedrooms ?? '—' }} Bed</span>
         <span class="badge">{{ property.bathrooms ?? '—' }} Bath</span>
         <span class="badge">{{ property.sqft ? property.sqft.toLocaleString() : '—' }} sqft</span>
       </div>
 
-      <div class="meta-row caption" v-if="property.builder || property.year_built">
+      <div class="meta-row caption" v-if="showValuation && (property.builder || property.year_built)">
         <span v-if="property.builder">{{ property.builder }}</span>
         <span v-if="property.year_built">Built {{ property.year_built }}</span>
       </div>
 
-      <span class="status-pin">Available</span>
+      <span class="status-pin" v-if="showSpecs">Available</span>
+
+      <p class="caption" v-if="!showSpecs">
+        Upload a blueprint to see size and rooms; an inspection form adds valuation and renovation priorities.
+      </p>
+      <p class="caption" v-else-if="!showValuation">
+        Upload a filled inspection form to see valuation, builder details and renovation priorities.
+      </p>
 
       <div class="quick-actions">
         <span class="quick-actions-label caption">Quick Actions</span>
@@ -123,7 +146,13 @@ function openHeroPhoto() {
           <button class="quick-action-btn" title="Refresh property data" aria-label="Refresh property data" @click="$emit('refresh')">
             <AppIcon name="refresh" :size="14" />
           </button>
-          <button class="quick-action-btn" title="Open primary photo" aria-label="Open primary photo" @click="openHeroPhoto">
+          <button
+            v-if="heroUrl"
+            class="quick-action-btn"
+            title="Open primary photo"
+            aria-label="Open primary photo"
+            @click="openHeroPhoto"
+          >
             <AppIcon name="camera" :size="14" />
           </button>
           <button class="quick-action-btn" title="Copy property ID" aria-label="Copy property ID" @click="copyPropertyId">
@@ -164,13 +193,6 @@ function openHeroPhoto() {
   border-bottom: 1px solid var(--color-border);
 }
 
-.ribbon-title {
-  font-size: var(--text-xs);
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  color: var(--color-text-muted);
-}
-
 .ribbon-location {
   font-size: var(--text-xs);
   color: var(--color-text-muted);
@@ -182,6 +204,17 @@ function openHeroPhoto() {
 .carousel {
   display: flex;
   flex-direction: column;
+}
+
+.carousel-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 20px 16px;
+  color: var(--color-text-muted);
+  background-color: var(--color-bg-inset);
+  border-bottom: 1px solid var(--color-border);
 }
 
 .hero-img {
