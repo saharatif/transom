@@ -82,10 +82,11 @@ const STATUS_LABELS = { processing: 'Processing…', complete: 'Complete', faile
 
 <template>
   <div class="upload-panel">
-    <div class="panel-heading">
+    <div class="panel-header-bar">
       <h2 class="column-title">Asset Ingestion Queue</h2>
     </div>
 
+    <div class="panel-body">
     <div class="doc-type-select" role="radiogroup" aria-label="Document type">
       <button
         v-for="(label, key) in docTypeLabels"
@@ -189,21 +190,37 @@ const STATUS_LABELS = { processing: 'Processing…', complete: 'Complete', faile
       </table>
       <p v-else class="caption empty-state">No uploads yet this session.</p>
     </div>
+    </div>
   </div>
 </template>
 
 <style scoped>
+/* One card, like PropertyCard/ChatPanel, so all three columns' tiles
+   start at the same level with identical header bars (the previous
+   loose title-then-boxes stack left the columns looking ragged). */
 .upload-panel {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  background-color: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+  flex-shrink: 0;
 }
 
-/* Matches the vertical text offset inside the other columns' header
-   bars (1px card border + 10px padding), so all three column titles sit
-   on one line. */
-.panel-heading {
-  padding-top: 11px;
+/* Mirrors PropertyCard's .card-ribbon / ChatPanel's .chat-header. */
+.panel-header-bar {
+  padding: 10px 14px;
+  background-color: var(--color-bg-inset);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.panel-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px;
 }
 
 .doc-type-select {
@@ -236,7 +253,7 @@ const STATUS_LABELS = { processing: 'Processing…', complete: 'Complete', faile
   padding: 32px 16px;
   border: 2px dashed var(--color-border);
   border-radius: var(--radius-card);
-  background-color: var(--color-bg-card);
+  background-color: var(--color-bg-inset);
   cursor: pointer;
   text-align: center;
   transition: border-color 0.2s ease, background-color 0.2s ease;
@@ -244,7 +261,7 @@ const STATUS_LABELS = { processing: 'Processing…', complete: 'Complete', faile
 
 .drop-zone.drag-over {
   border: 2px solid var(--color-primary);
-  background-color: color-mix(in srgb, var(--color-primary) 8%, var(--color-bg-card));
+  background-color: color-mix(in srgb, var(--color-primary) 8%, var(--color-bg-inset));
 }
 
 .drop-zone.uploading {
@@ -271,18 +288,15 @@ const STATUS_LABELS = { processing: 'Processing…', complete: 'Complete', faile
   color: var(--color-text-main);
 }
 
+/* Plain section inside the card — no nested card chrome. */
 .queue-section {
-  background-color: var(--color-bg-card);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-card);
-  padding: 4px 4px 12px;
-  box-shadow: var(--shadow-card);
+  padding-bottom: 4px;
 }
 
 .queue-tabs {
   display: flex;
   gap: 4px;
-  padding: 8px 8px 4px;
+  padding: 0 0 4px;
   border-bottom: 1px solid var(--color-border);
   margin-bottom: 8px;
 }
@@ -319,7 +333,6 @@ const STATUS_LABELS = { processing: 'Processing…', complete: 'Complete', faile
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 0 12px;
 }
 
 .queue-row {
@@ -423,6 +436,6 @@ const STATUS_LABELS = { processing: 'Processing…', complete: 'Complete', faile
 }
 
 .empty-state {
-  padding: 12px;
+  padding: 6px 0;
 }
 </style>

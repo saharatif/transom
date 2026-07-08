@@ -1759,3 +1759,30 @@ Test output:
 "WARRANTY ASSISTANT"    -> y=101.0 h=17.0
 All three identical position, height, and style. Screenshot confirms.
 -> PASSED.
+
+=====================================================================
+TEST 41: Upload column converted to a card — all three column tiles
+start at the same level
+---------------------------------------------------------------------
+Test name: tile_alignment_test
+
+Change under test (user report on the deployed app): the left column
+was a loose stack (floating title, chips, then boxes) while the middle
+and right columns were cards starting at the column top — so the tiles
+looked ragged even though the TITLES aligned (Test 40). FileUpload is
+now one card matching PropertyCard/ChatPanel: a .panel-header-bar
+(same padding/background as the property ribbon and chat header)
+containing the column title, with chips/dropzone/queue as the card
+body; the queue section lost its nested-card chrome; the dropzone
+switched to the inset background for contrast inside the card.
+
+Bash command:
+node tile_align_check.mjs   # Playwright boundingBox measurement
+
+Test output:
+.upload-panel  top y=90.0
+.property-card top y=90.0
+.chat-panel    top y=90.0
+titles all y=101.0 (Test 40 alignment preserved)
+Screenshots verified in both themes.
+-> PASSED.
