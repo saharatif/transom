@@ -1,8 +1,83 @@
+import re
+
 # Deterministic valuation formulas, parsed once from
 # docs/pdfs/texas_property_valuation_formulas.pdf — never RAG'd, since
 # these are fixed formulas/lookups, not open-ended text to retrieve from.
 # Multipliers and cost ranges below are transcribed directly from that
 # reference doc's Section 2.1 table.
+
+# Maps the inspection form's free-text renovation categories (as they
+# appear in renovation_cost_estimate — see inspection_parser.py) to the
+# fixed ROI_TABLE keys above. "Paint (interior)" and any other category
+# printed on the form with no matching PDF-defined ROI multiplier is
+# intentionally left unmapped rather than guessed.
+RENOVATION_CATEGORY_ALIASES = {
+    "roof replacement": "roof_replacement",
+    "hvac system": "hvac_replacement",
+    "kitchen remodel": "kitchen_remodel",
+    "bathroom updates": "bathroom_updates",
+    "flooring refinish": "flooring_refinish",
+    "exterior / curb appeal": "curb_appeal_exterior",
+}
+
+_COST_NUMBER = re.compile(r"[\d,]+(?:\.\d+)?")
+
+
+def parse_cost_estimate(cost_str):
+    """Parse a handwritten cost field like "8000-10000 USD" or "$9,500"
+    into a single representative number (the midpoint of a range, or the
+    lone figure) for feeding into calculate_renovation_impact. Returns
+    None if the field is empty or has no parseable number — callers skip
+    those rows rather than guessing a cost.
+    """
+    if not cost_str or not isinstance(cost_str, str):
+        return None
+    numbers = [float(m.replace(",", "")) for m in _COST_NUMBER.findall(cost_str)]
+    if not numbers:
+        return None
+    return sum(numbers) / len(numbers)
+
+
+def sum_costs_by_priority(renovation_breakdown, priorities):
+    """Sum parse_cost_estimate() over every row in a property's
+    renovation_cost_estimate breakdown whose priority is in `priorities`
+    (e.g. {1, 2} for Urgent + Moderate — see RenovationTable.vue's
+    PRIORITY_LABELS). Rows with an unparseable/missing cost are skipped
+    rather than treated as zero. Returns None if no matching row had a
+    parseable cost, so the caller can hide the figure instead of
+    displaying a misleading $0.
+    """
+    total = 0.0
+    matched = False
+    for row in renovation_breakdown or []:
+        if row.get("priority") not in priorities:
+            continue
+        cost = parse_cost_estimate(row.get("cost"))
+        if cost is not None:
+            total += cost
+            matched = True
+    return round(total, 2) if matched else None
+
+
+def estimate_renovation_uplift(base_value, sqft, price_per_sqft, renovation_breakdown):
+    """Apply calculate_renovation_impact to a property's actual parsed
+    renovation_cost_estimate rows (RenovationTable's data source), mapping
+    each row's free-text category/cost to the PDF's fixed ROI schedule.
+    Rows with an unrecognized category or an unparseable cost are skipped
+    (e.g. "Paint (interior)" has no PDF-defined multiplier). Returns None
+    if nothing in the breakdown was usable, so the caller can fall back
+    to showing only the pre-renovation base value.
+    """
+    renovations = []
+    for row in renovation_breakdown or []:
+        key = RENOVATION_CATEGORY_ALIASES.get((row.get("category") or "").strip().lower())
+        cost = parse_cost_estimate(row.get("cost"))
+        if key and cost is not None:
+            renovations.append({"category": key, "cost": cost})
+    if not renovations:
+        return None
+    return calculate_renovation_impact(base_value, renovations, price_per_sqft, sqft)
+
 
 ROI_TABLE = {
     "roof_replacement":     {"multiplier": 1.40, "priority": "urgent",

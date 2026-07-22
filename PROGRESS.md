@@ -92,6 +92,10 @@ Full-codebase review with four goals: better coding strategies, improved logic, 
 - [x] `Dockerfile` (multi-stage: node build → python image with spaCy model + reranker baked in), `docker-compose.yml` (env_file + `/data` volume), `.dockerignore`
 - [x] `DEPLOY.md` — Railway (recommended), Fly.io, generic Docker host + Cloudflare tunnel; env var table, RAM sizing (2–4 GB), demo-link cost/safety notes
 
+**Real improved-vs-previous valuation (BUGS.md #34):** the dashboard's price was actually the pre-renovation base value (`calculate_base_value()`), never adjusted for renovations despite `calculate_renovation_impact()` existing and being unit-tested since Milestone 4 — it was only ever wired into the MCP tools. Built the real feature instead of relabeling: `estimate_renovation_uplift()` maps a property's actual parsed renovation rows into the ROI math; `/property/{id}` returns both `previous_estimate` and `improved_estimate`; PropertyCard shows the improved figure (tagged) with the previous estimate alongside, only when a genuine improved figure exists. Verified against property #1's real data: $316,944 → $384,899.
+- [x] Urgent + Medium repair cost total added beneath the two valuation figures — `sum_costs_by_priority()` sums the averaged cost estimate of every Urgent + Moderate priority renovation row (Low excluded); `valuation.urgent_medium_total` in the API response, shown as a caption line on PropertyCard. Verified against property #1's real data ($51,000 across 7 rows).
+- [x] Profit-after-renovation highlighted — `calculate_renovation_impact()`'s `net_equity_gain` (value uplift minus renovation cost) was already computed but discarded before reaching the API; now returned as `valuation.profit_estimate` and shown as a filled green (or red, if ever negative) pill badge on PropertyCard, distinct from the plain estimate lines above it. Verified against property #1's real data ($18,955).
+
 ## Milestone 8 — Polish + demo
 
 - [ ] Demo video

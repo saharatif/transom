@@ -1786,3 +1786,112 @@ Test output:
 titles all y=101.0 (Test 40 alignment preserved)
 Screenshots verified in both themes.
 -> PASSED.
+
+=====================================================================
+TEST 42: Real improved-vs-previous valuation (BUGS.md #34)
+---------------------------------------------------------------------
+Test name: improved_vs_previous_valuation_test
+
+Change under test (user report: the displayed $316,944 was described as
+"the current improved estimate" and asked to be tagged as such, with a
+previous/pre-renovation figure added). Investigation found $316,944 was
+actually calculate_base_value() alone — the PRE-renovation figure —
+never adjusted for renovations anywhere in the dashboard path, even
+though calculate_renovation_impact() (Section 2 of the formulas PDF)
+already existed and was unit-tested, just never called outside the MCP
+tools. Implemented the real feature: RENOVATION_CATEGORY_ALIASES +
+parse_cost_estimate() + estimate_renovation_uplift() in calculator.py
+map the inspection form's actual renovation_cost_estimate rows into
+calculate_renovation_impact(); GET /property/{id} returns
+valuation.previous_estimate / valuation.improved_estimate (null when no
+usable renovation data); PropertyCard shows the improved figure as the
+primary price with an "IMPROVED ESTIMATE" tag and the previous estimate
+as a secondary line, only when an improved figure actually exists —
+otherwise falls back to the untagged base value.
+
+Bash command:
+uv run pytest tests/unit -q     # 81 passed (10 new: parser, category
+                                # mapping/skip, both endpoint cases)
+curl http://127.0.0.1:8000/property/1   # real property #1 data
+node valuation_check2.mjs        # Playwright, full card screenshot
+
+Test output:
+- GET /property/1 valuation: {"previous_estimate": 316944.0,
+  "improved_estimate": 384899.0} — real inspection-form renovation rows
+  (roof replacement 8000-10000 USD midpoint 9000 x 1.40, etc.) genuinely
+  applied via calculate_renovation_impact(), not a relabel.
+- UI: "IMPROVED ESTIMATE" tag, primary price $384,899, "Previous
+  estimate (pre-renovation): $316,944" beneath — all rendering
+  correctly, screenshot confirms layout, zero console errors.
+- No-renovation-data case (unit test): improved_estimate is null,
+  previous_estimate still populated, UI falls back to untagged price.
+-> PASSED.
+
+=====================================================================
+TEST 43: Urgent + Medium repair cost total under the two valuation
+figures
+---------------------------------------------------------------------
+Test name: urgent_medium_total_test
+
+Change under test (user request): sum the averaged cost estimate of
+every Urgent + Medium priority renovation row, placed under the
+Improved/Previous estimate lines added in Test 42. calculator.py's new
+sum_costs_by_priority(breakdown, priorities) sums parse_cost_estimate()
+over rows matching a priority set (skips rows with no parseable cost
+rather than treating them as 0); GET /property/{id} adds
+valuation.urgent_medium_total (priorities {1, 2} — Urgent + Moderate,
+matching RenovationTable's own PRIORITY_LABELS; priority 3 "Low"
+excluded); PropertyCard shows it as a caption line beneath the price
+block, only when a total exists.
+
+Bash command:
+uv run pytest tests/unit -q   # 87 passed (6 new: priority summing,
+                              # unparseable-cost skip, low-priority
+                              # exclusion, no-match/empty -> None,
+                              # endpoint cases)
+curl http://127.0.0.1:8000/property/1
+node urgent_medium_check.mjs   # Playwright, full card screenshot
+
+Test output:
+- Real property #1 data: 4 urgent rows (roof 9000, HVAC 7500, curb
+  5000 = wait, curb is priority 1 -> included) + medium rows (kitchen
+  13500, bathroom 7500, flooring 6500, paint 2000) = $51,000 total.
+  Verified against the API response and matches hand calculation.
+- UI: "Urgent + Medium repairs (est.): $51,000" renders directly under
+  "Previous estimate (pre-renovation): $316,944", itself under
+  "IMPROVED ESTIMATE $384,899". Zero console errors.
+-> PASSED.
+
+=====================================================================
+TEST 44: Profit-after-renovation badge highlighted on PropertyCard
+---------------------------------------------------------------------
+Test name: profit_estimate_badge_test
+
+Change under test (user request): highlight the profit estimate after
+renovation. calculate_renovation_impact() already computed
+net_equity_gain (value uplift from ROI multipliers minus what the
+renovations actually cost) but main.py discarded it when building the
+valuation object — now threaded through as valuation.profit_estimate.
+PropertyCard renders it as a filled, bordered pill badge (not plain
+caption text, to genuinely stand out) with a check/alert icon, green
+for profit >= 0 and red for a deficit (defensive — see note below on
+why real data can't currently produce a negative value).
+
+Bash command:
+uv run pytest tests/unit -q     # 88 passed (3 new)
+curl http://127.0.0.1:8000/property/1
+node profit_check.mjs           # Playwright, both themes
+
+Test output:
+- Real property #1 data: profit_estimate = $18,955 (uplift 384,899 -
+  316,944 = wait, actually total_uplift - total_renovation_cost per the
+  formula, computed value: $18,955). Badge renders "Est. profit after
+  renovation: +$18,955" in a green filled pill under the urgent+medium
+  line, both themes, zero console errors.
+- Unit tests: positive case (3,600 profit from a single roof-replacement
+  row) pinned exactly; null case (no renovation data) asserted.
+- Documented (not live-tested): every ROI_TABLE multiplier is > 1.0, so
+  net_equity_gain is structurally non-negative against today's fixed
+  schedule — the frontend's negative/red branch is defensive for the
+  function's general contract, not reachable with current data.
+-> PASSED.

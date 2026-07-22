@@ -427,6 +427,19 @@ ModuleNotFoundError: No module named 'mcp.server.fastmcp'
 
 **Verified:** 5/5 consecutive live `/chat` runs answer "covered" with the computed fact (0.125" > 0.03125") and a `§ 7` citation; the 1/64" variant correctly answers within-tolerance/not covered; the off-topic car question still answers "not covered". Sentence-scoping logic pinned in `tests/unit/test_measurement.py` with the real mixed-threshold text.
 
+### 34. Dashboard displayed the pre-renovation base value mislabeled as if it reflected renovations (never actually "improved")
+
+**Symptom:** User reported the dashboard's price figure ($316,944 for property #1) as "the current improved estimate," asking for it to be tagged as such and for a pre-renovation figure to be shown alongside it.
+
+**Cause:** `properties.estimated_value` — the only valuation figure ever surfaced on the dashboard — was computed by `_maybe_update_estimated_value()` in `backend/db/queries.py` using `calculate_base_value()` alone (Section 1 of the formulas PDF: price/sqft × sqft × age factor). The renovation-adjusted calculation, `calculate_renovation_impact()` (Section 2: applies each renovation's ROI multiplier and sums the uplift), has existed since Milestone 4 and was correctly unit-tested and wired into the MCP `calculate_renovation_roi` tool — but nothing in the ingestion/dashboard path ever called it. So the number shown was always the *pre*-renovation base value; relabeling it "Improved Estimate" as initially requested would have made a true number say something false.
+
+**Fix (built the real feature instead of relabeling):**
+1. `backend/valuation/calculator.py`: added `RENOVATION_CATEGORY_ALIASES` (maps the inspection form's free-text categories — "Roof replacement", "HVAC system", etc. — to `ROI_TABLE`'s fixed keys; categories with no PDF-defined multiplier, e.g. "Paint (interior)", are intentionally left unmapped rather than guessed), `parse_cost_estimate()` (turns a handwritten range like "8000-10000 USD" into its midpoint), and `estimate_renovation_uplift()` (feeds a property's actual parsed `renovation_cost_estimate` rows through `calculate_renovation_impact()`, skipping any row with an unmapped category or unparseable cost; returns `None` if nothing was usable).
+2. `GET /property/{id}` now returns a `valuation` object: `previous_estimate` (the existing pre-renovation base value) and `improved_estimate` (the real renovation-adjusted figure, or `null` when there's no usable renovation data yet).
+3. `PropertyCard.vue`: shows `improved_estimate` as the primary price with an "IMPROVED ESTIMATE" tag and `previous_estimate` as a secondary line *only* when an improved figure actually exists to contrast it with; falls back to the plain base value (no tag) when it doesn't, so the label is never applied to a number that isn't actually renovation-adjusted.
+
+**Verified:** live against property #1's real data — `previous_estimate: $316,944`, `improved_estimate: $384,899` (base + $12,600 uplift from the roof-replacement row's $9,000 midpoint × 1.40 multiplier, plus the other renovation rows), confirmed in the browser with the tag, primary price, and previous-estimate line all rendering correctly. Unit tests cover the cost-range parser, the category mapping (including the unmapped-category skip), and both endpoint cases (with and without usable renovation data) — see `tests/test_log.txt` Test 42.
+
 ## Open
 
 _15b. RAG answer grounding is improved but not guaranteed — no automated check yet confirms a generated citation's section number actually appears in the chunks that were retrieved for that answer (see #15 residual risk). This is also why #20's fix can't help on runs where retrieval itself misses the relevant chunk — the reasoning fix only kicks in once the right source is actually in context._

@@ -131,6 +131,114 @@ def test_missing_property_404(client, temp_db):
     assert res.status_code == 404
 
 
+def test_property_valuation_shows_both_previous_and_improved_estimate(
+        client, temp_db, monkeypatch):
+    """End-to-end regression for BUGS.md #34: previously properties.
+    estimated_value (pre-renovation base value) was the only figure ever
+    shown, mislabeled as if it reflected renovations. Blueprint + real
+    inspection renovation data should now also produce a genuine
+    improved_estimate via the actual ROI math.
+    """
+    monkeypatch.setattr(
+        main, "process_blueprint",
+        lambda path, pid, doc_id, db: {"sqft": 2201, "bedrooms": 4, "bathrooms": 3})
+    monkeypatch.setattr(
+        main, "parse_inspection_form",
+        lambda path, pid, doc_id, db: {
+            "year_built": 2006,
+            "renovation_cost_estimate": [
+                {"category": "Roof replacement", "priority": 1,
+                 "cost": "8000-10000 USD", "roi": "140%"},
+            ],
+        })
+    client.post("/ingest/blueprint", data={"property_id": 1},
+               files={"file": ("plan.pdf", b"%PDF-1.4", "application/pdf")})
+    client.post("/ingest/inspection", data={"property_id": 1},
+               files={"file": ("form.pdf", b"%PDF-1.4", "application/pdf")})
+
+    valuation = client.get("/property/1").json()["valuation"]
+    assert valuation["previous_estimate"] == 316944.0
+    # 9000 (midpoint of 8000-10000) * 1.40 = 12,600 uplift
+    assert valuation["improved_estimate"] == 329544.0
+    assert valuation["improved_estimate"] > valuation["previous_estimate"]
+    # The one row is Urgent (priority 1), so its 9000 midpoint is the
+    # whole urgent+medium total.
+    assert valuation["urgent_medium_total"] == 9000.0
+    # net_equity_gain: value uplift (12,600) minus the renovation's own
+    # cost (9,000 midpoint) = 3,600 profit.
+    assert valuation["profit_estimate"] == 3600.0
+
+
+# Note: net_equity_gain = total_uplift - total_cost, and every ROI_TABLE
+# multiplier is > 1.0 (see test_valuation.py's
+# test_all_six_categories_have_multipliers), so total_uplift = cost *
+# multiplier is always >= cost for any single mapped category — meaning
+# profit_estimate can never actually be negative against the current
+# fixed ROI schedule. The frontend's negative/red styling branch is
+# still correct defensive design (net_equity_gain's sign isn't
+# structurally guaranteed by calculate_renovation_impact's signature,
+# only by today's ROI_TABLE contents), just not reachable with real data
+# today — so there's no live-data test for it here.
+
+
+def test_no_profit_estimate_when_no_renovation_data(client, temp_db, monkeypatch):
+    monkeypatch.setattr(
+        main, "process_blueprint",
+        lambda path, pid, doc_id, db: {"sqft": 2201})
+    monkeypatch.setattr(
+        main, "parse_inspection_form",
+        lambda path, pid, doc_id, db: {"year_built": 2006})
+    client.post("/ingest/blueprint", data={"property_id": 1},
+               files={"file": ("plan.pdf", b"%PDF-1.4", "application/pdf")})
+    client.post("/ingest/inspection", data={"property_id": 1},
+               files={"file": ("form.pdf", b"%PDF-1.4", "application/pdf")})
+
+    assert client.get("/property/1").json()["valuation"]["profit_estimate"] is None
+
+
+def test_property_valuation_null_improved_when_no_renovation_data(client, temp_db, monkeypatch):
+    monkeypatch.setattr(
+        main, "process_blueprint",
+        lambda path, pid, doc_id, db: {"sqft": 2201})
+    monkeypatch.setattr(
+        main, "parse_inspection_form",
+        lambda path, pid, doc_id, db: {"year_built": 2006})
+    client.post("/ingest/blueprint", data={"property_id": 1},
+               files={"file": ("plan.pdf", b"%PDF-1.4", "application/pdf")})
+    client.post("/ingest/inspection", data={"property_id": 1},
+               files={"file": ("form.pdf", b"%PDF-1.4", "application/pdf")})
+
+    valuation = client.get("/property/1").json()["valuation"]
+    assert valuation["previous_estimate"] == 316944.0
+    assert valuation["improved_estimate"] is None
+    assert valuation["urgent_medium_total"] is None
+
+
+def test_urgent_medium_total_excludes_low_priority_rows(client, temp_db, monkeypatch):
+    monkeypatch.setattr(
+        main, "process_blueprint",
+        lambda path, pid, doc_id, db: {"sqft": 2201})
+    monkeypatch.setattr(
+        main, "parse_inspection_form",
+        lambda path, pid, doc_id, db: {
+            "year_built": 2006,
+            "renovation_cost_estimate": [
+                {"category": "Roof replacement", "priority": 1, "cost": "8000-10000 USD"},
+                {"category": "Kitchen remodel", "priority": 2, "cost": "9000-18000 USD"},
+                {"category": "Exterior / curb appeal", "priority": 3, "cost": "3000-7000 USD"},
+            ],
+        })
+    client.post("/ingest/blueprint", data={"property_id": 1},
+               files={"file": ("plan.pdf", b"%PDF-1.4", "application/pdf")})
+    client.post("/ingest/inspection", data={"property_id": 1},
+               files={"file": ("form.pdf", b"%PDF-1.4", "application/pdf")})
+
+    valuation = client.get("/property/1").json()["valuation"]
+    # midpoints: 9000 (urgent) + 13500 (moderate) = 22500; the priority-3
+    # (low) row's 5000 midpoint must NOT be included.
+    assert valuation["urgent_medium_total"] == 22500.0
+
+
 def test_blank_chat_message_422(client, temp_db):
     res = client.post("/chat", data={"property_id": 1, "message": "   "})
     assert res.status_code == 422

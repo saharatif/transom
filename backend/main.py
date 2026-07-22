@@ -17,6 +17,7 @@ from .db.queries import (save_photo_assessment, save_blueprint_fields,
                          get_contractors_by_category, reset_property_data,
                          get_property_images, get_image_record)
 from .db.setup_db import setup_db
+from .valuation.calculator import estimate_renovation_uplift, sum_costs_by_priority
 from .rag.graph import rag_agent
 import os, shutil, sqlite3, tempfile, uuid, logfire
 
@@ -188,7 +189,41 @@ def get_property_detail(property_id: int):
     images = [{"id": img["id"], "url": f"/images/{img['id']}"}
               for img in get_property_images(property_id)
               if os.path.exists(img["image_path"])]
-    return {"property": prop, "renovations": renovations, "images": images}
+
+    # properties.estimated_value (set by _maybe_update_estimated_value) is
+    # calculate_base_value() only — the PRE-renovation figure — never the
+    # renovation-adjusted number, even though that math
+    # (calculate_renovation_impact) has existed since Milestone 4. It was
+    # wired into the MCP tools but never surfaced on the dashboard. Compute
+    # the real improved estimate here from the property's actual parsed
+    # renovation_cost_estimate rows, so the UI can show both figures
+    # honestly instead of labeling the base value "improved".
+    previous_estimate = prop.get("estimated_value")
+    improved_estimate = None
+    # net_equity_gain (value uplift from the ROI multipliers, minus what
+    # the renovations actually cost) is the profit figure — computed
+    # alongside updated_value but previously discarded here.
+    profit_estimate = None
+    if previous_estimate and prop.get("sqft") and renovations:
+        impact = estimate_renovation_uplift(
+            previous_estimate, prop["sqft"],
+            prop.get("price_per_sqft") or 180.0, renovations)
+        if impact:
+            improved_estimate = impact["updated_value"]
+            profit_estimate = impact["net_equity_gain"]
+
+    # Sum of the (averaged) cost estimates for every Urgent + Moderate
+    # priority renovation row — the two priority tiers RenovationTable
+    # flags as pressing (priority 3 "Low" is excluded) — so the card can
+    # show at a glance what the near-term repair bill looks like.
+    urgent_medium_total = sum_costs_by_priority(renovations, {1, 2})
+
+    valuation = {"previous_estimate": previous_estimate,
+                "improved_estimate": improved_estimate,
+                "profit_estimate": profit_estimate,
+                "urgent_medium_total": urgent_medium_total}
+    return {"property": prop, "renovations": renovations, "images": images,
+            "valuation": valuation}
 
 
 @app.get("/images/{image_id}")

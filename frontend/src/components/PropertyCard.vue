@@ -9,6 +9,13 @@ const props = defineProps({
   // Session-scoped photo list, filtered by App.vue — NOT data.images
   // directly (that's every photo ever stored for the property).
   images: { type: Array, default: () => [] },
+  // { previous_estimate, improved_estimate } from GET /property/{id} —
+  // previous_estimate is the pre-renovation base value
+  // (calculate_base_value); improved_estimate is that plus the ROI
+  // uplift from the property's actual parsed renovation costs
+  // (calculate_renovation_impact), or null if there's no renovation
+  // data to apply yet.
+  valuation: { type: Object, default: () => ({}) },
   loading: { type: Boolean, default: false },
   notFound: { type: Boolean, default: false },
   // Session gating (set by App.vue): specs (beds/baths/sqft) come from
@@ -37,10 +44,49 @@ const title = computed(() => {
   return p.address ? `Property, ${p.address}` : `Property #${p.id}`
 })
 
-const priceLabel = computed(() => {
-  const v = property.value?.estimated_value ?? property.value?.listed_price
-  if (!v) return 'Value pending'
+function formatUsd(v) {
   return `$${Number(v).toLocaleString()}`
+}
+
+// Prefer the true renovation-adjusted figure when one could be computed;
+// otherwise fall back to the pre-renovation base value (still labeled
+// honestly below, never as "improved" when it isn't).
+const primaryLabel = computed(() => {
+  const v = props.valuation?.improved_estimate ?? props.valuation?.previous_estimate
+        ?? property.value?.listed_price
+  return v ? formatUsd(v) : 'Value pending'
+})
+const isImproved = computed(() => props.valuation?.improved_estimate != null)
+
+// Only worth showing as a distinct "previous" line when there's an
+// improved figure alongside it to contrast with.
+const previousLabel = computed(() => {
+  const prev = props.valuation?.previous_estimate
+  return isImproved.value && prev ? formatUsd(prev) : null
+})
+
+// Sum of the (averaged) cost estimates for every Urgent + Moderate
+// priority renovation row — shown under the two value figures above.
+const urgentMediumLabel = computed(() => {
+  const v = props.valuation?.urgent_medium_total
+  return v ? formatUsd(v) : null
+})
+
+// Net equity gain: the ROI-driven value uplift minus what the
+// renovations actually cost (calculate_renovation_impact's
+// net_equity_gain) — highlighted as its own badge since it's the
+// bottom-line "was this worth it" figure, distinct from the estimate
+// figures above. Can be negative (renovation costs exceed the uplift
+// the ROI multipliers credit), so sign and color both need to reflect
+// that rather than assuming profit.
+const profitAmount = computed(() => props.valuation?.profit_estimate)
+const hasProfit = computed(() => profitAmount.value != null)
+const isPositiveProfit = computed(() => (profitAmount.value ?? 0) >= 0)
+const profitLabel = computed(() => {
+  if (!hasProfit.value) return null
+  const v = profitAmount.value
+  const sign = v > 0 ? '+' : v < 0 ? '−' : ''
+  return `${sign}${formatUsd(Math.abs(v))}`
 })
 
 const addressLine = computed(() => {
@@ -109,11 +155,21 @@ function openHeroPhoto() {
     <div class="card-body" v-else-if="property">
       <div class="title-row">
         <h2>{{ showValuation ? title : `Property #${property.id}` }}</h2>
-        <span
-          v-if="showValuation"
-          class="price"
-          :class="{ pending: priceLabel === 'Value pending' }"
-        >{{ priceLabel }}</span>
+        <div class="price-block" v-if="showValuation">
+          <span class="price-tag" v-if="isImproved">Improved Estimate</span>
+          <span class="price" :class="{ pending: primaryLabel === 'Value pending' }">{{ primaryLabel }}</span>
+          <span class="previous-estimate caption" v-if="previousLabel">
+            Previous estimate (pre-renovation): {{ previousLabel }}
+          </span>
+          <span class="urgent-medium-estimate caption" v-if="urgentMediumLabel">
+            Urgent + Medium repairs (est.): {{ urgentMediumLabel }}
+          </span>
+        </div>
+      </div>
+
+      <div class="profit-badge" v-if="hasProfit" :class="{ negative: !isPositiveProfit }">
+        <AppIcon :name="isPositiveProfit ? 'check' : 'alert'" :size="13" />
+        <span>Est. profit after renovation: {{ profitLabel }}</span>
       </div>
 
       <div class="address-row caption" v-if="showValuation">
@@ -247,9 +303,25 @@ function openHeroPhoto() {
 
 .title-row {
   display: flex;
-  align-items: baseline;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
+}
+
+.price-block {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+}
+
+.price-tag {
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-success);
+  white-space: nowrap;
 }
 
 .price {
@@ -263,6 +335,11 @@ function openHeroPhoto() {
   font-size: var(--text-sm);
   font-weight: 500;
   color: var(--color-text-muted);
+}
+
+.previous-estimate,
+.urgent-medium-estimate {
+  white-space: nowrap;
 }
 
 .address-row {
@@ -299,6 +376,31 @@ function openHeroPhoto() {
   font-weight: 500;
   color: var(--color-success);
   background-color: color-mix(in srgb, var(--color-success) 15%, transparent);
+}
+
+/* Bottom-line "was this worth it" figure — a filled badge (not just
+   colored text) so it reads as the headline takeaway, distinct from the
+   plain estimate lines in the price block above it. Green/positive by
+   default; switches to the danger color when renovation costs exceed
+   the ROI-credited value uplift. */
+.profit-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--color-success);
+  background-color: color-mix(in srgb, var(--color-success) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-success) 35%, transparent);
+}
+
+.profit-badge.negative {
+  color: var(--color-danger);
+  background-color: color-mix(in srgb, var(--color-danger) 16%, transparent);
+  border-color: color-mix(in srgb, var(--color-danger) 35%, transparent);
 }
 
 .quick-actions {

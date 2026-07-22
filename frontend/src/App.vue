@@ -229,6 +229,7 @@ async function onResetClick() {
           <PropertyCard
             :data="propertyData"
             :images="visibleImages"
+            :valuation="showValuation ? propertyData?.valuation : {}"
             :loading="loadState === 'loading'"
             :not-found="loadState === 'notfound'"
             :show-specs="showSpecs"

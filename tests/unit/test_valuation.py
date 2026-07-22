@@ -8,7 +8,8 @@ tests/test_log.txt, Tests 11-12) — these tests pin them permanently.
 import pytest
 
 from backend.valuation.calculator import (
-    ROI_TABLE, calculate_base_value, calculate_renovation_impact)
+    ROI_TABLE, calculate_base_value, calculate_renovation_impact,
+    estimate_renovation_uplift, parse_cost_estimate, sum_costs_by_priority)
 
 
 class TestBaseValue:
@@ -74,3 +75,95 @@ class TestRenovationImpact:
             calculate_renovation_impact(
                 288000.0, [{"category": "kitchen_remodel", "cost": cost}],
                 180.0, 2000)
+
+
+class TestParseCostEstimate:
+    def test_range_returns_midpoint(self):
+        assert parse_cost_estimate("8000-10000 USD") == 9000.0
+
+    def test_single_figure(self):
+        assert parse_cost_estimate("$9,500") == 9500.0
+
+    def test_no_number_returns_none(self):
+        assert parse_cost_estimate("TBD") is None
+
+    @pytest.mark.parametrize("value", [None, "", 9000])
+    def test_non_string_or_empty_returns_none(self, value):
+        assert parse_cost_estimate(value) is None
+
+
+class TestEstimateRenovationUplift:
+    """Covers the real dashboard scenario (previously a gap — see
+    BUGS.md #34): turning the inspection form's free-text
+    renovation_cost_estimate rows into a genuine renovation-adjusted
+    valuation via calculate_renovation_impact, rather than only ever
+    showing the pre-renovation base value.
+    """
+
+    def test_maps_real_inspection_form_categories_and_cost_ranges(self):
+        base_value = 316944.0  # property #1's real base value
+        breakdown = [
+            {"category": "Roof replacement", "priority": 1, "cost": "8000-10000 USD", "roi": "140%"},
+            {"category": "HVAC system", "priority": 1, "cost": "5000-10000 USD", "roi": "120%"},
+        ]
+        result = estimate_renovation_uplift(base_value, 2201, 180.0, breakdown)
+        assert result is not None
+        # midpoints: 9000 * 1.40 + 7500 * 1.20 = 12600 + 9000 = 21600
+        assert result["total_value_uplift"] == 21600.0
+        assert result["updated_value"] > base_value
+
+    def test_unmapped_category_is_skipped_not_guessed(self):
+        # "Paint (interior)" has no PDF-defined ROI multiplier.
+        breakdown = [{"category": "Paint (interior)", "cost": "1000-3000 USD"}]
+        assert estimate_renovation_uplift(288000.0, 2000, 180.0, breakdown) is None
+
+    def test_unparseable_cost_is_skipped(self):
+        breakdown = [{"category": "Roof replacement", "cost": None}]
+        assert estimate_renovation_uplift(288000.0, 2000, 180.0, breakdown) is None
+
+    def test_empty_breakdown_returns_none(self):
+        assert estimate_renovation_uplift(288000.0, 2000, 180.0, []) is None
+
+    def test_mixed_known_and_unknown_categories_uses_only_known(self):
+        breakdown = [
+            {"category": "Kitchen remodel", "cost": "9000-18000 USD"},
+            {"category": "Paint (interior)", "cost": "1000-3000 USD"},
+        ]
+        result = estimate_renovation_uplift(288000.0, 2000, 180.0, breakdown)
+        assert result is not None
+        assert result["total_renovation_cost"] == 13500.0  # only the kitchen midpoint
+
+
+class TestSumCostsByPriority:
+    """The urgent-medium repair total shown under the two value figures
+    on PropertyCard — sums the (averaged) cost of every Urgent (1) +
+    Moderate (2) priority renovation row, matching RenovationTable's own
+    priority labels."""
+
+    def test_sums_only_urgent_and_moderate(self):
+        breakdown = [
+            {"category": "Roof replacement", "priority": 1, "cost": "8000-10000 USD"},
+            {"category": "HVAC system", "priority": 1, "cost": "5000-10000 USD"},
+            {"category": "Kitchen remodel", "priority": 2, "cost": "9000-18000 USD"},
+            {"category": "Curb appeal", "priority": 3, "cost": "3000-7000 USD"},
+        ]
+        # midpoints: 9000 + 7500 + 13500 = 30000 (priority-3 row excluded)
+        assert sum_costs_by_priority(breakdown, {1, 2}) == 30000.0
+
+    def test_rows_with_unparseable_cost_are_skipped_not_zero(self):
+        breakdown = [
+            {"category": "Roof replacement", "priority": 1, "cost": "8000-10000 USD"},
+            {"category": "HVAC system", "priority": 1, "cost": None},
+        ]
+        assert sum_costs_by_priority(breakdown, {1, 2}) == 9000.0
+
+    def test_no_matching_priority_returns_none(self):
+        breakdown = [{"category": "Curb appeal", "priority": 3, "cost": "3000-7000 USD"}]
+        assert sum_costs_by_priority(breakdown, {1, 2}) is None
+
+    def test_empty_breakdown_returns_none(self):
+        assert sum_costs_by_priority([], {1, 2}) is None
+
+    def test_missing_priority_key_is_not_matched(self):
+        breakdown = [{"category": "Roof replacement", "cost": "8000-10000 USD"}]
+        assert sum_costs_by_priority(breakdown, {1, 2}) is None
